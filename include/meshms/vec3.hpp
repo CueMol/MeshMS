@@ -72,7 +72,7 @@ inline double pysq(double x) { return x * x; }
 inline double pysq(double x) { return std::pow(x, 2.0); }
 #endif
 
-// Clamp to [-1, 1] then arccos (mathutil._acos_clamped).
+// Clamp to [-1, 1] then arccos (mathutil._acos_clamped). Canonical.
 inline double acos_clamped(double x) {
   if (x > 1.0) x = 1.0;
   else if (x < -1.0) x = -1.0;

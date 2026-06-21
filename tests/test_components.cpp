@@ -1,4 +1,4 @@
-// Verify the multi-component support in the public facade (capi.cpp):
+// Verify the multi-component support in the public facade (meshms.cpp):
 //   * an isolated atom is meshed as its full vdW sphere (watertight, area ~
 //     4*pi*r^2, radial normals, atom_id set, face_type == 3);
 //   * a multi-component input produces every component, each bit-for-bit equal
@@ -13,7 +13,7 @@
 #include <numbers>
 #include <vector>
 
-#include "meshms/capi.hpp"
+#include "meshms/meshms.hpp"
 #include "test_util.hpp"
 
 using namespace meshms;

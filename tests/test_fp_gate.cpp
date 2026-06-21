@@ -14,7 +14,7 @@
 //
 //   ./build/test_fp_gate --dump > tests/ref/fp_gate.txt
 //
-// Everything here goes through <meshms/capi.hpp> only -- the consumer's view --
+// Everything here goes through <meshms/meshms.hpp> only -- the consumer's view --
 // so the facade paths (multi-component split, isolated atoms, post-processing)
 // are exercised alongside the pipeline.
 #include <cmath>
@@ -24,7 +24,7 @@
 #include <string>
 #include <vector>
 
-#include "meshms/capi.hpp"
+#include "meshms/meshms.hpp"
 #include "test_util.hpp"
 
 using namespace meshms;

@@ -15,9 +15,12 @@
 // orient_faces the boundary vertices sharing a tag are welded by union-find, and
 // the per-face normals N are dropped (Python `return V, F, None`).
 //
-// OUT OF SCOPE (stubbed, see the pipeline module): the build_surface "auto" NaN-retry
-// jitter fallback (numpy-RNG-dependent, never triggered by the golden molecules;
-// build_surface uses faithful coords == jitter=None semantics, noted as a TODO).
+// JITTER FALLBACK (run_auto, see the pipeline module): the "auto" NaN-retry
+// jitter path is now wired. run_auto first meshes the faithful coordinates
+// (bit-identical to run() for the golden molecules, which never produce NaN);
+// only when the faithful mesh is degenerate (non-finite vertices, e.g. the
+// strongly symmetric fullerene) does it re-mesh from jitter_centers(). It is a
+// deterministic std-lib fallback, NOT a numpy-RNG match -- see run_auto.
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -91,8 +94,30 @@ Surface build_mesh(const RSComponents& rs, double mesh_size, bool fuse = false);
 Surface run(const Geom& geom, const Para& para, bool fuse = false);
 
 // Read an xyzr file and return the SES mesh. Uses faithful coordinates
-// (jitter=None semantics); the auto NaN-retry jitter fallback is out of scope.
+// (jitter=None semantics); for the "auto" NaN-retry fallback call run_auto on
+// the geom read from the file instead.
 Surface build_surface(const std::string& xyzr_path, double radius_probe = 1.4,
                       double mesh_size = 0.5, bool fuse = false);
+
+// True if any vertex component of `s` is non-finite (NaN or inf). Used as the
+// run_auto retry trigger: a degenerate, NaN-poisoned SES mesh (e.g. from a
+// strongly symmetric molecule whose faithful coordinates collapse a toroidal
+// patch) fails this check and is re-meshed with perturbed centers.
+bool surface_has_nan(const Surface& s);
+
+// "auto" jitter fallback for degenerate-symmetry molecules. Attempt 0 meshes the
+// FAITHFUL coordinates via run(geom, para, fuse); if that result is NaN-free it
+// is returned unchanged, so clean molecules are bit-identical to run() and all
+// golden results are preserved. Only when the faithful mesh has non-finite
+// vertices (surface_has_nan) does it retry: for k = 1..max_retries it rebuilds
+// from jitter_centers(geom, jitter_mag, seed = k) (full compute_rs + build_mesh
+// cycle, since perturbing centers invalidates the RS arrangement) and returns
+// the first NaN-free mesh. Build exceptions are treated as failures and the loop
+// continues. If every attempt fails the last result is returned (or the last
+// exception rethrown). This is a DETERMINISTIC std-lib fallback: jitter_centers
+// uses std::mt19937_64 + std::normal_distribution, so the perturbed mesh is
+// platform-implementation dependent and does NOT bit-match numpy's PCG64 RNG.
+Surface run_auto(const Geom& geom, const Para& para, bool fuse,
+                 double jitter_mag = 1e-3, int max_retries = 32);
 
 }  // namespace meshms

@@ -2,8 +2,8 @@ cmake_minimum_required(VERSION 3.20)
 project(MeshMS LANGUAGES CXX)
 
 # --- C++20 implementation of the MolSurfComp SES algorithm -------------------
-# See PORTING_CONTRACT.md (indexing & data-layout conventions) and
-# OPTIMIZATION.md (the 28-core, output-preserving parallel design).
+# See docs/INTERNALS.md (indexing & data-layout conventions) and
+# docs/OPTIMIZATION.md (the 28-core, output-preserving parallel design).
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -180,7 +180,7 @@ target_include_directories(MeshMS PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 # PRIVATE (not PUBLIC): the library is COMPILED with C++20, but the public facade
-# (meshms/capi.hpp) is C++17-clean, so we do NOT force C++20 onto consumers. A
+# (meshms/meshms.hpp) is C++17-clean, so we do NOT force C++20 onto consumers. A
 # C++20 static lib links into a C++17 program without issue.
 target_compile_features(MeshMS PRIVATE cxx_std_20)
 
@@ -211,8 +211,11 @@ if(MESHMS_TBB)
 endif()
 
 # --- CLI ---------------------------------------------------------------------
-if(MESHMS_BUILD_CLI AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/src/cli/main.cpp)
-  add_executable(meshms_cli ${CMAKE_CURRENT_SOURCE_DIR}/src/cli/main.cpp)
+# Every src/cli/*.cpp (CONFIGURE_DEPENDS = new modules auto-picked). src/*.cpp is
+# non-recursive, so the CLI sources never leak into the core library above.
+if(MESHMS_BUILD_CLI)
+  file(GLOB CLI_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/cli/*.cpp)
+  add_executable(meshms_cli ${CLI_SOURCES})
   target_link_libraries(meshms_cli PRIVATE MeshMS)
 endif()
 

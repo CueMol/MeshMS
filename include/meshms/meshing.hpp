@@ -8,7 +8,7 @@
 // norm/sign). The advancing front recurses (collapse_nonneighbor1/2 recurse into
 // advancing_front_approach) -- a plain recursive port (Python raises the limit).
 //
-// Indexing (1-based-with-dummy, see PORTING_CONTRACT.md):
+// Indexing (1-based-with-dummy, see docs/INTERNALS.md):
 //   * P : std::vector<Vec3>, P[0] dummy, real points at P[1..Np] (size Np+1).
 //   * T : std::vector<std::array<int,3>> of 1-based [a,b,c] triples; NO dummy slot,
 //         Nt == T.size().
@@ -23,6 +23,22 @@
 #include "meshms/vec3.hpp"
 
 namespace meshms {
+
+// ----- record-matrix helpers (1-based-with-dummy rows AND columns) ----------
+// A "record matrix" row stores 1-based columns; column 0 is a dummy slot (see the
+// record-layout convention in docs/INTERNALS.md). rget3/rset3 read/write a length-3
+// coordinate stored at columns [c0, c0+1, c0+2] of such a row.
+template <std::size_t N>
+inline Vec3 rget3(const std::array<double, N>& row, int c0) {
+  return Vec3{row[static_cast<std::size_t>(c0)], row[static_cast<std::size_t>(c0 + 1)],
+              row[static_cast<std::size_t>(c0 + 2)]};
+}
+template <std::size_t N>
+inline void rset3(std::array<double, N>& row, int c0, const Vec3& v) {
+  row[static_cast<std::size_t>(c0)] = v.x;
+  row[static_cast<std::size_t>(c0 + 1)] = v.y;
+  row[static_cast<std::size_t>(c0 + 2)] = v.z;
+}
 
 // loop[1..loopsize] = local segment0 indices; loop[0] dummy.
 using Loop = std::vector<int>;

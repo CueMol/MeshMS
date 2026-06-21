@@ -140,14 +140,6 @@ Vec3 normal_sphere(const Vec3& c_sphere, const Vec3& x) {
   return d / std::sqrt(pysq(d.x) + pysq(d.y) + pysq(d.z));
 }
 
-#ifndef MESHMS_FP_FAST
-double acos_clamped_local(double x) {
-  if (x > 1.0) x = 1.0;
-  else if (x < -1.0) x = -1.0;
-  return std::acos(x);
-}
-#endif
-
 #ifdef MESHMS_FP_FAST
 // A deploy build compares angles without taking acos. The pair (grp, c) --
 // grp 0 when the orientation t < 0 (angle = acos(c), in [0,pi]) and grp 1
@@ -196,7 +188,7 @@ AngleT angle_sphere(const Edge& e, const Edge& f, const Vec3& n,
   return AngleT{t < 0 ? 0 : 1, clamp_pm1(dot(u, v) / (nu * nv))};
 #else
   if (nu == 0.0 || nv == 0.0) return 0.0;  // degenerate; avoid div-by-zero
-  double base = acos_clamped_local(dot(u, v) / (nu * nv));
+  double base = acos_clamped(dot(u, v) / (nu * nv));
   if (t < 0) return base;
   return TWO_PI - base;
 #endif
@@ -214,7 +206,7 @@ AngleT angle_vectors(Vec3 u, Vec3 v, const Vec3& n) {
   return AngleT{t < 0 ? 0 : 1, clamp_pm1(dot(u, v) / (nu * nv))};
 #else
   if (nu == 0.0 || nv == 0.0) return 0.0;  // degenerate; avoid div-by-zero
-  double base = acos_clamped_local(dot(u, v) / (nu * nv));
+  double base = acos_clamped(dot(u, v) / (nu * nv));
   if (t < 0) return base;
   return TWO_PI - base;
 #endif

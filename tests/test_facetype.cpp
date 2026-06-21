@@ -17,7 +17,7 @@
 #include <tbb/global_control.h>
 #endif
 
-#include "meshms/capi.hpp"
+#include "meshms/meshms.hpp"
 #include "meshms/geom.hpp"
 #include "meshms/vec3.hpp"
 #include "test_util.hpp"

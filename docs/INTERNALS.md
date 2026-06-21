@@ -4,7 +4,7 @@ MeshMS implements the **MolSurfComp** SES algorithm (Quan & Stamm), whose data
 structures are deeply index-interdependent. To reproduce them faithfully the C++
 code keeps the algorithm's original **1-based indexing** rather than renumbering;
 this document is the reference for that convention and the record layouts the
-internal stages pass around. (The public API in `meshms/capi.hpp` is fully
+internal stages pass around. (The public API in `meshms/meshms.hpp` is fully
 0-based and dense — these conventions are internal to the library.)
 
 Pipeline order:

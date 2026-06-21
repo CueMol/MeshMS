@@ -1,5 +1,5 @@
-// Implementation of the C++17-safe public facade (capi.hpp). Compiled as part of
-// meshms_core (C++20); only the HEADER is constrained to C++17.
+// Implementation of the C++17-safe public facade (meshms.hpp). Compiled as part
+// of meshms_core (C++20); only the HEADER is constrained to C++17.
 //
 // Multi-component support lives HERE, above the faithful pipeline: the input is
 // split into connected components of the SAS-intersection graph (the same
@@ -9,12 +9,13 @@
 // (it throws "isolated SAS-ball" or silently drops unreachable components), are
 // meshed directly as full vdW spheres. A single-component input takes the exact
 // pre-existing path, so the golden gates are unaffected.
-#include "meshms/capi.hpp"
+#include "meshms/meshms.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <map>
 #include <stdexcept>
 #include <string>
@@ -270,6 +271,17 @@ void append_isolated_sphere(MeshResult& out, const RSCache::Isolated& iso,
   }
 }
 
+// True if any vertex component of the result is non-finite (NaN or inf). A
+// single such vertex poisons the whole surface (areas / normals propagate the
+// NaN), which is exactly the degenerate symptom the jitter fallback retries on.
+bool result_has_nan(const MeshResult& m) {
+  for (const std::array<double, 3>& v : m.verts) {
+    if (!std::isfinite(v[0]) || !std::isfinite(v[1]) || !std::isfinite(v[2]))
+      return true;
+  }
+  return false;
+}
+
 }  // namespace
 
 std::shared_ptr<RSCache> compute_rs_from_array(
@@ -306,22 +318,67 @@ MeshResult build_mesh_from_cache(const std::shared_ptr<RSCache>& rs,
 
 MeshResult build_surface_from_array(
     const std::vector<std::array<double, 4>>& xyzr, double radius_probe,
-    double mesh_size, bool fuse) {
-  return build_mesh_from_cache(compute_rs_from_array(xyzr, radius_probe),
-                               mesh_size, fuse);
+    double mesh_size, bool fuse, Jitter jitter) {
+  if (jitter == Jitter::None) {
+    // Faithful coordinates only, the original one-shot path.
+    return build_mesh_from_cache(compute_rs_from_array(xyzr, radius_probe),
+                                 mesh_size, fuse);
+  }
+  // Jitter::Auto -- faithful-first with a NaN-retry symmetry-jitter fallback
+  // (mirrors pipeline::run_auto, composed with the multi-component split above):
+  // attempt 0 uses the faithful centers and stays bit-identical to the None
+  // path; only a degenerate (NaN) or throwing faithful build is re-meshed from
+  // perturbed centers (seed = attempt). Magnitude and retry budget match
+  // run_auto's defaults.
+  constexpr double kJitterMag = 1e-3;
+  constexpr int kMaxRetries = 32;
+  MeshResult best;
+  bool have_best = false;
+  std::exception_ptr last_error;
+  for (int attempt = 0; attempt <= kMaxRetries; ++attempt) {
+    try {
+      std::vector<std::array<double, 4>> in;
+      if (attempt > 0) {
+        // Round-trip through Geom to reuse the canonical jitter_centers RNG.
+        const Geom g = jitter_centers(geom_from_array(xyzr), kJitterMag, attempt);
+        in.reserve(xyzr.size());
+        for (int a = 1; a <= g.M; ++a) {
+          const Vec3& c = g.centers[static_cast<std::size_t>(a)];
+          in.push_back({c.x, c.y, c.z, g.R[static_cast<std::size_t>(a)]});
+        }
+      }
+      MeshResult r = build_mesh_from_cache(
+          compute_rs_from_array(attempt == 0 ? xyzr : in, radius_probe),
+          mesh_size, fuse);
+      if (!result_has_nan(r)) return r;  // first NaN-free mesh wins
+      best = std::move(r);               // keep the last finite-sized attempt
+      have_best = true;
+      last_error = nullptr;
+    } catch (...) {
+      last_error = std::current_exception();  // failed build -> keep trying
+    }
+  }
+  // Every attempt was degenerate: return the last successful (still-NaN) build
+  // as a best effort, or rethrow if even the last attempt threw.
+  if (have_best) return best;
+  if (last_error) std::rethrow_exception(last_error);
+  return best;  // unreachable for kMaxRetries >= 0, but keeps the return total
 }
 
-// version() is defined in version.cpp (declared in capi.hpp).
+// version() is defined in version.cpp (declared in meshms.hpp).
 
 MeshResult close_cusps(const MeshResult& mesh, double weld_tol) {
   WeldResult w = weld(to_vec3(mesh.verts), to_tri(mesh.faces), weld_tol);
   FillResult fh = fill_small_holes(std::move(w.V), w.F);  // w.V dead after this
-  MeshResult r;
-  r.verts = from_vec3(fh.V);
-  r.faces = from_tri(fh.F);
-  r.vnormals = from_vec3(vnormals_from_faces(fh.V, fh.F));
-  // atom_id intentionally left empty: the weld merges vertices of different owners.
-  return r;
+  // Single aggregate return guarantees RVO and avoids the extra moves of the
+  // three vectors. Members are listed in MeshResult's declared order (verts,
+  // vnormals, faces); atom_id and face_type are intentionally left empty -- the
+  // weld merges vertices of different owners and the fan-fill rebuilds faces.
+  return MeshResult{
+      from_vec3(fh.V),                              // verts
+      from_vec3(vnormals_from_faces(fh.V, fh.F)),   // vnormals
+      from_tri(fh.F),                               // faces
+  };
 }
 
 MeshResult remove_flaps(const MeshResult& mesh, int passes) {

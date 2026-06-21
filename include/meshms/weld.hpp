@@ -59,7 +59,7 @@ struct BoundaryLoopsResult {
 };
 BoundaryLoopsResult boundary_loops(const std::vector<Vec3>& V, const std::vector<Tri>& F);
 
-// Facade-layout overload: identical result over the capi MeshResult arrays
+// Facade-layout overload: identical result over the facade MeshResult arrays
 // (x,y,z triples and 0-based uint32 index triples) without converting the whole
 // mesh to Vec3/Tri first.
 BoundaryLoopsResult boundary_loops(const std::vector<std::array<double, 3>>& V,

@@ -8,7 +8,7 @@
 //
 // The core is templated over the vertex/face container element types so the
 // facade-layout overloads (std::array<double,3> / std::array<uint32_t,3>, the
-// meshms::capi MeshResult arrays) run the IDENTICAL math without converting the
+// facade MeshResult arrays) run the IDENTICAL math without converting the
 // whole mesh to Vec3/Tri first. The array<double,3> -> Vec3 load is an
 // element-wise copy of the same three doubles, so results are bit-identical.
 #include "meshms/mesh_check.hpp"
