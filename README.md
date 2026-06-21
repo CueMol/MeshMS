@@ -1,5 +1,7 @@
 # MeshMS / libMeshMS
 
+[![CI](https://github.com/CueMol/MeshMS/actions/workflows/ci.yml/badge.svg)](https://github.com/CueMol/MeshMS/actions/workflows/ci.yml)
+
 A C++ library that computes the **Solvent Excluded Surface (SES)** of a molecule
 analytically and returns it as a watertight, triangulated mesh. It is packaged as
 the static library `libMeshMS.a` (CMake target `MeshMS`, namespace `meshms::`).

@@ -33,7 +33,7 @@ jobs:
           - { os: macos-latest,   deplibs: deplibs_macOS_ARM64.tar.bz2, advisory: true  } # ARM64
           - { os: windows-latest, deplibs: deplibs_Windows_X64.tar.bz2, advisory: true  }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # CMake + Ninja on all three runners (Ninja is not guaranteed on the macOS image).
       - name: Set up CMake and Ninja
@@ -47,7 +47,7 @@ jobs:
 
       - name: Cache deplibs (TBB 2023.0.0)
         id: deplibs-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: deplibs
           # version + OS-specific asset in the key: a future deplibs bump rebuilds
@@ -97,7 +97,7 @@ jobs:
           - { os: macos-latest,   advisory: true  }
           - { os: windows-latest, advisory: true  }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up CMake and Ninja
         uses: lukka/get-cmake@latest
