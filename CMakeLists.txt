@@ -29,16 +29,26 @@ endif()
 option(MESHMS_BUILD_TESTS "Build the C++ port unit/golden tests" ${MESHMS_IS_TOP_LEVEL})
 option(MESHMS_BUILD_CLI   "Build the MeshMS CLI" ${MESHMS_IS_TOP_LEVEL})
 
-# -ffp-contract=off is MANDATORY: g++ -march=native otherwise fuses a*b+c into
-# an FMA, which changes the last-bit rounding and breaks the ULP-sensitive SAS
-# golden tests (bit-for-bit 1e-9 topology gate). Keep it always, never optional.
-add_compile_options(-Wall -Wextra -ffp-contract=off)
-if(MESHMS_SANITIZE)
-  add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
-  add_link_options(-fsanitize=address,undefined)
-endif()
-if(MESHMS_NATIVE)
-  add_compile_options(-march=native -O3)
+# No-FMA-contraction is MANDATORY for the ULP-sensitive SAS golden gate: a fused
+# a*b+c changes the last-bit rounding and breaks the bit-for-bit 1e-9 topology
+# gate. On GNU/Clang that is -ffp-contract=off; on MSVC the default /fp:precise
+# already does NOT fuse (only /fp:fast would), and /fp:contract:off (cl 19.30+)
+# makes it explicit. NEVER pass /fp:fast here.
+if(MSVC)
+  add_compile_options(/W4 /utf-8 /fp:precise)
+  if(MSVC_VERSION GREATER_EQUAL 1930)
+    add_compile_options(/fp:contract:off)
+  endif()
+  # MESHMS_SANITIZE / MESHMS_NATIVE stay GNU/Clang-only (not part of the gate).
+else()
+  add_compile_options(-Wall -Wextra -ffp-contract=off)
+  if(MESHMS_SANITIZE)
+    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=address,undefined)
+  endif()
+  if(MESHMS_NATIVE)
+    add_compile_options(-march=native -O3)
+  endif()
 endif()
 
 # Paths to the xyzr molecule set and the golden reference dumps the tests use.

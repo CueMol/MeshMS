@@ -9,6 +9,7 @@
 
 #include <array>
 #include <cmath>
+#include <numbers>
 #include <utility>
 #include <vector>
 
@@ -141,7 +142,7 @@ LocalMesh mesh_toroide(const Vec3& ci, const Vec3& cj, double ri,
     theta = std::abs(theta1 - theta2);
   }
 
-  double theta0 = M_PI / 3.0;
+  double theta0 = std::numbers::pi / 3.0;
   // to guarantee the length of each edge is greater than tolerance
   int N_probe = std::max(static_cast<int>(std::floor(Rp * theta / d)) + 1,
                          static_cast<int>(std::floor(theta / theta0)) + 1);
@@ -243,7 +244,7 @@ LocalMesh mesh_cusp(const Vec3& /*c1*/, double /*r1*/,
                     int e2, bool tagged) {
   // corresponds to the arc on the probe at fixed point
   int N_probe = static_cast<int>(std::floor(Rp * theta1 / d)) + 1;
-  double theta0 = M_PI / 3.0;
+  double theta0 = std::numbers::pi / 3.0;
   int N_arc = static_cast<int>(std::floor(angle / theta0)) + 1;
 
   long long N_point = 1;
