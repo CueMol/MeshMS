@@ -3,6 +3,7 @@
 // the sas_patches module lines 260-353, deferred there in the want_area block) ported as a
 // free function. See convex.hpp for scope. MESH PATH ONLY (ext unused).
 #include "meshms/convex.hpp"
+#include "meshms/parallel.hpp"
 
 #include <algorithm>
 #include <array>
@@ -186,10 +187,7 @@ void data_SESsphpat_convex(MeshState& state, const Geom& geom, const DataI& di,
   // ordered merge then add_patch each patch in atom-then-patch order.
   std::vector<std::vector<LocalMesh>> atom_lm(static_cast<std::size_t>(M) + 1);
 
-#if defined(_OPENMP)
-#pragma omp parallel for schedule(dynamic)
-#endif
-  for (int i = 1; i <= M; ++i) {
+  meshms::parallel_for(1, M + 1, [&](int i) {
     const int nsatom_i = static_cast<int>(ds.satom[static_cast<std::size_t>(i)].size());
     const int ncircleindex_i =
         static_cast<int>(dc.circleindex[static_cast<std::size_t>(i)].size());
@@ -216,7 +214,7 @@ void data_SESsphpat_convex(MeshState& state, const Geom& geom, const DataI& di,
       nloops_i = 0;
     } else {
       // no patches on this atom; skip (neither MATLAB branch runs).
-      continue;
+      return;
     }
 
     // nsatom_i > 0 || ncircleindex_i > 0 is guaranteed here.
@@ -275,7 +273,7 @@ void data_SESsphpat_convex(MeshState& state, const Geom& geom, const DataI& di,
       const std::size_t Np = lm.P.empty() ? 0 : lm.P.size() - 1;
       lm.vatom.assign(Np, static_cast<int32_t>(i));
     }
-  }
+  });
 
   // --- SERIAL ordered merge (atom ascending, then patch ascending) -------
   for (int i = 1; i <= M; ++i) {

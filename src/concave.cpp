@@ -1,6 +1,7 @@
 // Concave SES patch construction --- faithful port of the concave module's
 // SESconcavepat (MESH PATH ONLY, av=None). See concave.hpp for scope.
 #include "meshms/concave.hpp"
+#include "meshms/parallel.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1246,10 +1247,7 @@ void SESconcavepat(MeshState& state, const Geom& geom, const DataI& di,
   // vector<LocalMesh>. `cs` is read-only here (arg_eSAS already 0). A SERIAL
   // ordered merge then add_patch every patch in probe-then-patch order.
   std::vector<std::vector<LocalMesh>> probe_lm(static_cast<std::size_t>(nhight) + 1);
-#if defined(_OPENMP)
-#pragma omp parallel for schedule(dynamic)
-#endif
-  for (int i = 1; i <= nhight; ++i) {
+  meshms::parallel_for(1, nhight + 1, [&](int i) {
     int Kn = nbo.N_neighbor[static_cast<std::size_t>(i)];
     std::vector<int> K_in(static_cast<std::size_t>(Kn) + 1, 0);
     for (int t = 1; t <= Kn; ++t) {
@@ -1257,7 +1255,7 @@ void SESconcavepat(MeshState& state, const Geom& geom, const DataI& di,
     }
     data_concavepat(probe_lm[static_cast<std::size_t>(i)], cs, i, hight_set, K_in,
                     Kn, I, Iijk, C, Rp, direction);
-  }
+  });
   for (int i = 1; i <= nhight; ++i) {
     for (const LocalMesh& lm : probe_lm[static_cast<std::size_t>(i)]) {
       if (lm.emit) state.add_patch(lm.P, lm.T, lm.NV, lm.vids, lm.vatom);
@@ -1272,10 +1270,7 @@ void SESconcavepat(MeshState& state, const Geom& geom, const DataI& di,
   // 1-slot-per-i layout (emit=false where hight[i]!=1) keeps the merge order
   // deterministic (ascending i), then a SERIAL ordered add_patch merge.
   std::vector<LocalMesh> tri_lm(static_cast<std::size_t>(s) + 1);
-#if defined(_OPENMP)
-#pragma omp parallel for schedule(dynamic)
-#endif
-  for (int i = 1; i <= s; ++i) {
+  meshms::parallel_for(1, s + 1, [&](int i) {
     if (hight[static_cast<std::size_t>(i)] == 1) {
       Vec3 c = I[static_cast<std::size_t>(i)];
       int a_i = Iijk[static_cast<std::size_t>(i)][0];
@@ -1356,7 +1351,7 @@ void SESconcavepat(MeshState& state, const Geom& geom, const DataI& di,
                           static_cast<int32_t>(a_i), static_cast<int32_t>(a_j),
                           static_cast<int32_t>(a_k), ci, cj, ck);
     }
-  }
+  });
   for (int i = 1; i <= s; ++i) {
     const LocalMesh& lm = tri_lm[static_cast<std::size_t>(i)];
     if (lm.emit) state.add_patch(lm.P, lm.T, lm.NV, lm.vids, lm.vatom);

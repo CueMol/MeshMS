@@ -16,7 +16,7 @@ endif()
 option(MESHMS_WITH_CGAL "Build the optional CGAL gate cross-checker (GPL)" OFF)
 option(MESHMS_SANITIZE  "Enable ASan/UBSan for the fragile mesher" OFF)
 option(MESHMS_NATIVE    "Build with -march=native -O3" OFF)
-option(MESHMS_OPENMP    "Build with OpenMP (parallel stages)" ON)
+option(MESHMS_TBB       "Build with Intel oneTBB (parallel stages)" ON)
 
 # Build the CLI / golden+unit tests only when MeshMS is the top-level project
 # (a find_package / add_subdirectory consumer should NOT build them). CMake 3.20
@@ -62,17 +62,22 @@ target_include_directories(MeshMS PUBLIC
 # C++20 static lib links into a C++17 program without issue.
 target_compile_features(MeshMS PRIVATE cxx_std_20)
 
-# OpenMP enables the parallel per-entity stages. When OFF (or unavailable) the
-# code still builds: the #pragma omp lines are ignored by a compiler invoked
-# without -fopenmp, so the loops run serially and identically.
-set(MESHMS_OPENMP_PUBLIC FALSE)  # substituted into the package Config
-if(MESHMS_OPENMP)
-  find_package(OpenMP)
-  if(OpenMP_CXX_FOUND)
-    target_link_libraries(MeshMS PUBLIC OpenMP::OpenMP_CXX)
-    set(MESHMS_OPENMP_PUBLIC TRUE)
+# oneTBB drives the parallel per-entity stages (output-preserving: each entity
+# writes its own slot, then a serial ascending-index merge). When OFF -- or when
+# TBB is not found -- the code builds and runs SERIALLY and identically:
+# meshms/parallel.hpp's serial fallback compiles whenever MESHMS_WITH_TBB is
+# undefined, so there is no parallel dependency. TBB comes from the cuemol2
+# "deplibs" bundle; a consumer points at it with CMAKE_PREFIX_PATH=<deplibs root>
+# (or -DTBB_DIR=<root>/tbb-<ver>/lib/cmake/TBB), which resolves find_package(TBB).
+set(MESHMS_TBB_PUBLIC FALSE)  # substituted into the package Config
+if(MESHMS_TBB)
+  find_package(TBB CONFIG)
+  if(TBB_FOUND)
+    target_link_libraries(MeshMS PUBLIC TBB::tbb)
+    target_compile_definitions(MeshMS PUBLIC MESHMS_WITH_TBB)
+    set(MESHMS_TBB_PUBLIC TRUE)
   else()
-    message(WARNING "MESHMS_OPENMP=ON but OpenMP not found; building serially")
+    message(WARNING "MESHMS_TBB=ON but oneTBB not found; building serially")
   endif()
 endif()
 

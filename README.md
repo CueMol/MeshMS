@@ -2,8 +2,9 @@
 
 A C++ library that computes the **Solvent Excluded Surface (SES)** of a molecule
 analytically and returns it as a watertight, triangulated mesh. It is packaged as
-the static library `libMeshMS.a` (CMake target `MeshMS`, namespace `meshms::`)
-and has **no third-party C++ dependencies** by default.
+the static library `libMeshMS.a` (CMake target `MeshMS`, namespace `meshms::`).
+Parallelism uses **Intel oneTBB** (from the cuemol2 deplibs bundle); a serial
+build (`-DMESHMS_TBB=OFF`) has **no third-party C++ dependencies**.
 
 The surface algorithm is a faithful implementation of **MolSurfComp** (Quan &
 Stamm, 2016/2017): the SES is decomposed into convex spherical, toroidal, and
@@ -23,7 +24,9 @@ ctest --test-dir build --output-on-failure
 The CMake uses `file(GLOB CONFIGURE_DEPENDS)`: every `src/*.cpp` joins the
 `MeshMS` library, every `tests/test_*.cpp` becomes its own CTest case — add files,
 no `CMakeLists.txt` edit needed. Options: `MESHMS_WITH_CGAL` (default OFF, zero
-third-party deps), `MESHMS_SANITIZE`, `MESHMS_NATIVE`, `MESHMS_OPENMP` (default ON).
+third-party deps), `MESHMS_SANITIZE`, `MESHMS_NATIVE`, `MESHMS_TBB` (default ON;
+oneTBB from the cuemol2 deplibs — point `CMAKE_PREFIX_PATH` / `TBB_DIR` at it, or
+`-DMESHMS_TBB=OFF` for a serial, dependency-free build).
 
 ## Using the library
 

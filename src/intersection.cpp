@@ -8,6 +8,7 @@
 //   - Cell binning uses std::floor then cast to int64 (NEVER int() truncation),
 //     matching np.floor(...).astype(np.int64) for negative coordinates.
 #include "meshms/intersection.hpp"
+#include "meshms/parallel.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -86,10 +87,7 @@ Neighbors interstructure(const Geom& geom, double Rp) {
   // concurrent read); the row is sorted, so its content/order is deterministic.
   // The serial prefix-sum + concatenation below emits the CSR in atom order, so
   // the result is bit-identical to the serial build.
-#if defined(_OPENMP)
-#pragma omp parallel for schedule(dynamic)
-#endif
-  for (int a = 1; a <= M; ++a) {
+  meshms::parallel_for(1, M + 1, [&](int a) {
     const Vec3 ca = C[a];
     const double ra = R[a];
     const std::int64_t ix = cix[a];
@@ -120,7 +118,7 @@ Neighbors interstructure(const Geom& geom, double Rp) {
       }
     }
     std::sort(found.begin(), found.end());
-  }
+  });
 
   // Prefix-sum off: off[i] = start of atom i's row, off[M+1] = total.
   // off[0] = 0 (dummy atom 0 has an empty range).

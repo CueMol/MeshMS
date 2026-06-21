@@ -5,6 +5,7 @@
 // coord_cusp, index_P, compute_NV_toroidal, mesh_toroide, mesh_cusp,
 // data_SEStorpat.
 #include "meshms/toroidal.hpp"
+#include "meshms/parallel.hpp"
 
 #include <array>
 #include <cmath>
@@ -399,10 +400,7 @@ void data_SEStorpat(MeshState& state, const Geom& geom, const DataI& di,
   std::vector<std::array<LocalMesh, 2>> crc_lm(static_cast<std::size_t>(ncircle) + 1);
 
   // --- Arc case ----------------------------------------------------------
-#if defined(_OPENMP)
-#pragma omp parallel for schedule(dynamic)
-#endif
-  for (int i = 1; i <= nsegment; ++i) {
+  meshms::parallel_for(1, nsegment + 1, [&](int i) {
     const auto& seg = segment[static_cast<std::size_t>(i)];
     const auto& nc = ncrasegment[static_cast<std::size_t>(i)];
     double r = nc[6];  // radius of the i-th arc
@@ -443,13 +441,10 @@ void data_SEStorpat(MeshState& state, const Geom& geom, const DataI& di,
                               /*atom_i=*/seg[0], /*atom_j=*/seg[1],
                               /*e1=*/seg[2], /*e2=*/seg[3]);
     }
-  }
+  });
 
   // --- Circle case -------------------------------------------------------
-#if defined(_OPENMP)
-#pragma omp parallel for schedule(dynamic)
-#endif
-  for (int i = 1; i <= ncircle; ++i) {
+  meshms::parallel_for(1, ncircle + 1, [&](int i) {
     const auto& crc = circle[static_cast<std::size_t>(i)];
     double r = crc[9];  // radius of the i-th circle
     Vec3 A{crc[3], crc[4], crc[5]};
@@ -495,7 +490,7 @@ void data_SEStorpat(MeshState& state, const Geom& geom, const DataI& di,
                               /*atom_i=*/ci_idx, /*atom_j=*/cj_idx, /*e1=*/0,
                               /*e2=*/0);
     }
-  }
+  });
 
   // --- SERIAL ordered merge (segments ascending, then circles ascending) -
   for (int i = 1; i <= nsegment; ++i) {
