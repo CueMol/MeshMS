@@ -1,6 +1,7 @@
 // Faithful port of the pipeline module (geometry path).
 #include "meshms/pipeline.hpp"
 
+#include <cstdint>
 #include <stdexcept>
 #include <tuple>
 #include <utility>
@@ -102,29 +103,45 @@ Surface build_mesh(const RSComponents& rs, double mesh_size, bool fuse) {
 
   // --- SES structure: mesh into the shared accumulator (convex, then concave,
   // then toroidal -- the exact Python order so indices line up) --------------
+  // Snapshot the face count after each mesher: the three appended blocks are the
+  // SES component types (MSMS codes 3 convex / 2 concave / 1 toroidal).
   MeshState state;
   data_SESsphpat_convex(state, geom, rs.di, rs.dc, rs.ds, rs.dl, rs.dp, &rs.ext, Rp, d);
+  const std::size_t n_convex = state.F.size();
   SESconcavepat(state, geom, rs.di, rs.ext, Rp, d, rs.inter);
+  const std::size_t n_concave = state.F.size();
   data_SEStorpat(state, geom, rs.di, rs.ds, rs.dc, &rs.ext, Rp, d);
+  const std::size_t n_total = state.F.size();
 
   Surface out;
   out.V = state.V;
   out.F = state.F;
   out.N = state.N;
   out.atom_id = state.vatom;  // per-vertex owning atom (aligned with V)
-  orient_faces(out.V, out.F, out.N);
+  out.ftype.resize(n_total);
+  for (std::size_t f = 0; f < n_total; ++f)
+    out.ftype[f] = static_cast<std::uint8_t>(f < n_convex  ? 3   // convex / contact
+                                             : f < n_concave ? 2  // concave / reentrant
+                                                             : 1);  // toroidal
+  orient_faces(out.V, out.F, out.N);  // in place per face: never reorders F
 
   if (fuse) {
     // ID-based boundary fusion (topological tags, not coordinate quantization):
     // structurally connects the non-cusp patches. The face count may drop
     // (degenerate triangles), so the per-face normals N are no longer aligned ->
     // N is dropped, mirroring Python's `return V, F, None`. warn=False path. The
-    // per-vertex atom_id is remapped to the surviving union-find root's atom id.
-    auto [V2, F2, A2] = fuse_by_id(out.V, out.F, state.tags, out.atom_id);
+    // per-vertex atom_id is remapped to the surviving union-find root's atom id;
+    // ftype is filtered to the surviving faces via kept_faces (same drop).
+    std::vector<std::uint32_t> kept_faces;
+    auto [V2, F2, A2] = fuse_by_id(out.V, out.F, state.tags, out.atom_id, 1e-6, &kept_faces);
     out.V = std::move(V2);
     out.F = std::move(F2);
     out.atom_id = std::move(A2);
     out.N.clear();
+    std::vector<std::uint8_t> ftype2;
+    ftype2.reserve(kept_faces.size());
+    for (std::uint32_t k : kept_faces) ftype2.push_back(out.ftype[k]);
+    out.ftype = std::move(ftype2);
   }
 
   // Per-vertex normals for external consumers (cuemol2/BALL expect per-vertex).

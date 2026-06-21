@@ -42,9 +42,14 @@ std::pair<std::vector<Vec3>, std::vector<Tri>> fuse_by_id(
 // root's atom id -- a neighbouring atom, sufficient for the colouring use case.
 // If `atom_id` is empty, atom_id2 is returned empty (the 2-output overload above
 // delegates here and drops it). V2/F2 are bit-identical to the 2-output version.
+//
+// kept_faces (optional): when non-null, receives the original index (into F) of
+// every surviving face, aligned with F2. Lets the caller filter any parallel
+// per-face array (e.g. the SES face type) through the same degenerate-drop. It is
+// a pure output add-on: V2/F2/atom_id2 are unchanged whether or not it is passed.
 std::tuple<std::vector<Vec3>, std::vector<Tri>, std::vector<int32_t>> fuse_by_id(
     const std::vector<Vec3>& V, const std::vector<Tri>& F,
     const std::vector<TagList>& tags, const std::vector<int32_t>& atom_id,
-    double eps = 1e-6);
+    double eps = 1e-6, std::vector<std::uint32_t>* kept_faces = nullptr);
 
 }  // namespace meshms
