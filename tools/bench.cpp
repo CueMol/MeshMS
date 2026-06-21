@@ -5,9 +5,9 @@
 // be overridden by env BENCH_REPS.
 //
 // Compile (already built into the lib via CMake tools/, or stand-alone):
-//   g++ -std=c++20 -O3 -march=native -fopenmp -ffp-contract=off \
-//       -I cpp/include cpp/tools/bench.cpp cpp/build/libmeshms_core.a -o /tmp/bench
-// Run:  OMP_NUM_THREADS=N /tmp/bench <data_dir> <mol>:<mesh_size> ...
+//   g++ -std=c++20 -O3 -march=native -ffp-contract=off \
+//       -I include tools/bench.cpp build/libMeshMS.a -ltbb -o /tmp/bench
+// Run:  /tmp/bench <data_dir> <mol>:<mesh_size> ...   (oneTBB auto-detects cores)
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>

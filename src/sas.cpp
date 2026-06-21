@@ -4,7 +4,7 @@
 // the append / per-atom CSR / jagged layout -- the OOM-wall fix.
 //
 // PARALLELISM (S6, ParallelSAS): the per-atom i-loop is split into two phases.
-// PHASE 1 is '#pragma omp parallel for' over i=1..M and is fully READ-ONLY on
+// PHASE 1 is 'meshms::parallel_for' over i=1..M and is fully READ-ONLY on
 // shared state -- it reads only the immutable {C, R, nb, Rp} and writes ONLY its
 // own per-atom event buffer ev[i] (no shared write -> race-free). For each atom
 // it runs the EXACT current logic but, instead of mutating I/Ii/I_circle/s, it
@@ -16,6 +16,7 @@
 // atom's events in recorded order, the s-numbering and every append order are
 // reproduced BIT-FOR-BIT.
 #include "meshms/sas.hpp"
+#include "meshms/parallel.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -88,10 +89,7 @@ std::pair<DataI, DataCir> data_I_Cir(const Geom& geom, const Neighbors& nb, doub
   // ---------------------------------------------------------------------------
   std::vector<AtomEvents> ev(static_cast<std::size_t>(M) + 1);
 
-#if defined(_OPENMP)
-#pragma omp parallel for schedule(dynamic)
-#endif
-  for (int i = 1; i <= M; ++i) {
+  meshms::parallel_for(1, M + 1, [&](int i) {
     AtomEvents& evi = ev[static_cast<std::size_t>(i)];
     const int Ri = Row(i);
     for (int row1 = 1; row1 <= Ri; ++row1) {
@@ -214,7 +212,7 @@ std::pair<DataI, DataCir> data_I_Cir(const Geom& geom, const Neighbors& nb, doub
         evi.circles.push_back(CircleEvent{j, A, nij, rij});
       }
     }
-  }
+  });
 
   // ---------------------------------------------------------------------------
   // PHASE 2: SERIAL, atoms i=1..M in order, ZERO float math. Replay ev[i] in

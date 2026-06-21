@@ -2,7 +2,7 @@
 
 Profiling-driven, **no CGAL**. Every optimization is
 **output-preserving**: all exact-match ctest stay green under both the parallel
-(`OMP_NUM_THREADS=28`) and serial (`=1`) build, and clean under ASan/UBSan + 10× repeat
+(oneTBB) and serial (`-DMESHMS_TBB=OFF`) build, and clean under ASan/UBSan + 10× repeat
 runs. The mesh is bit-for-bit identical to the pre-optimization faithful port.
 
 ## Result
@@ -32,7 +32,7 @@ accumulation, no changed float term order or `pysq` usage.
 
 | stage | % serial | technique | stage speedup @101M |
 |---|--:|---|--:|
-| `data_I_Cir` | 55% | two-phase: `#pragma omp parallel for` per-atom event discovery (read-only) → **serial replay** (zero float math) reproducing the exact `s`-numbering + `Ii`/`I_circle` order | ~12–13× |
+| `data_I_Cir` | 55% | two-phase: `meshms::parallel_for` per-atom event discovery (read-only) → **serial replay** (zero float math) reproducing the exact `s`-numbering + `Ii`/`I_circle` order | ~12–13× |
 | `interstructure` | 8% | parallel per-atom neighbour-row build (const grid reads) + serial CSR concat | ~6× |
 | convex mesh | 15% | per-atom parallel; **thread-local `segment0`/`Rj`** (fixes a shared-buffer race) + ordered `add_patch` | ~5× |
 | concave mesh | 13% | per-probe + per-simple-triangle parallel (call-local scratch) + ordered merge | ~3× |
@@ -50,15 +50,17 @@ per-frame `Dist` scratch reuse in the advancing front; `reserve()` hints.
 `-ffp-contract=off` is **mandatory and always on**: with `-march=native`, g++ otherwise
 fuses `a*b+c` into an FMA, changing the last-bit rounding and flipping the ULP-sensitive SAS
 boundary tests (the bit-for-bit golden gate). Options: `MESHMS_NATIVE` (`-march=native -O3`),
-`MESHMS_OPENMP` (default ON; `#pragma omp` is `#if defined(_OPENMP)`-guarded so an
-OpenMP-off build runs serially and identically).
+`MESHMS_TBB` (default ON; `meshms::parallel_for` falls back to a serial loop when
+`MESHMS_WITH_TBB` is undefined, so a TBB-off build runs serially and identically).
 
 ```sh
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DMESHMS_NATIVE=ON -DMESHMS_OPENMP=ON
-cmake --build build && ctest --test-dir build          # 18/18, OMP_NUM_THREADS=28
-OMP_NUM_THREADS=1 ctest --test-dir build               # 18/18, serial (same output)
-# bench: g++ -std=c++20 -O3 -march=native -fopenmp -ffp-contract=off -I include \
-#   tools/bench.cpp build/libMeshMS.a -o /tmp/bench ; OMP_NUM_THREADS=28 /tmp/bench tests/data 101M:0.6
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DMESHMS_NATIVE=ON \
+      -DMESHMS_TBB=ON -DCMAKE_PREFIX_PATH=<deplibs root>   # oneTBB from cuemol2 deplibs
+cmake --build build && ctest --test-dir build          # 18/18, parallel (oneTBB)
+cmake -S . -B build-serial -G Ninja -DMESHMS_TBB=OFF
+ctest --test-dir build-serial                          # 18/18, serial (same output)
+# bench: g++ -std=c++20 -O3 -march=native -ffp-contract=off -I include \
+#   tools/bench.cpp build/libMeshMS.a -ltbb -o /tmp/bench ; /tmp/bench tests/data 101M:0.6
 ```
 
 ## Remaining serial tail (future, smaller payoff)

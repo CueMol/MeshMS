@@ -1,11 +1,14 @@
 @PACKAGE_INIT@
 
-# MeshMS links OpenMP PUBLIC-ly when it was built with OpenMP, so the exported
-# target carries an OpenMP::OpenMP_CXX usage requirement. Re-find it here (only
-# when that was the case) before importing the targets.
-if(@MESHMS_OPENMP_PUBLIC@)
+# MeshMS is a STATIC library: libMeshMS.a does NOT bundle TBB's objects. When it
+# was built with TBB it links TBB::tbb PUBLIC-ly, so the exported target carries a
+# TBB::tbb usage requirement the downstream linker must satisfy. Re-find TBB here
+# (only when that was the case) so MeshMS::MeshMS resolves TBB::tbb before the
+# consumer links. TBB must be discoverable (cuemol2 deplibs via CMAKE_PREFIX_PATH
+# / TBB_DIR), the same place MeshMS found it.
+if(@MESHMS_TBB_PUBLIC@)
   include(CMakeFindDependencyMacro)
-  find_dependency(OpenMP)
+  find_dependency(TBB)
 endif()
 
 include("${CMAKE_CURRENT_LIST_DIR}/MeshMSTargets.cmake")

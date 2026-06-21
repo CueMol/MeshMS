@@ -2,7 +2,7 @@
 //   * every vertex has 1 <= atom_id <= M (no unknowns escape);
 //   * a vertex lying on exactly ONE atom's VdW sphere (a convex / rim vertex) is
 //     attributed to THAT atom (catches mis-attribution);
-//   * atom_id is deterministic: identical with 1 and 8 OpenMP threads;
+//   * atom_id is deterministic: identical with 1 and 8 TBB threads;
 //   * under fuse=true, atom_id stays aligned with V (size == V.size()) and in
 //     range [1, M].
 #include <array>
@@ -11,8 +11,8 @@
 #include <string>
 #include <vector>
 
-#if defined(_OPENMP)
-#include <omp.h>
+#if defined(MESHMS_WITH_TBB)
+#include <tbb/global_control.h>
 #endif
 
 #include "meshms/geom.hpp"
@@ -26,8 +26,9 @@ using namespace meshms;
 namespace {
 
 Surface build_threads(const Geom& geom, double d, bool fuse, int nthreads) {
-#if defined(_OPENMP)
-  omp_set_num_threads(nthreads);
+#if defined(MESHMS_WITH_TBB)
+  tbb::global_control gc(tbb::global_control::max_allowed_parallelism,
+                         static_cast<std::size_t>(nthreads));
 #else
   (void)nthreads;
 #endif
@@ -72,7 +73,7 @@ void check_mol(const std::string& mol) {
   CHECK(on_sphere > 0);   // convex/rim vertices must exist
   CHECK(mis == 0);        // and be attributed to their sphere's atom
 
-  // Determinism across thread counts (only meaningful when OpenMP is enabled).
+  // Determinism across thread counts (only meaningful when TBB is enabled).
   Surface s8 = build_threads(geom, 0.5, /*fuse=*/false, 8);
   CHECK(s8.atom_id.size() == s.atom_id.size());
   std::size_t tdiff = 0;
