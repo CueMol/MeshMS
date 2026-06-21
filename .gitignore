@@ -1,0 +1,6 @@
+# C++ build artifacts
+build/
+build-*/
+*.o
+*.a
+compile_commands.json

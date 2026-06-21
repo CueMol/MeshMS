@@ -1,0 +1,8 @@
+nI 2
+ncircle 0
+nsegment 3
+npatches 3
+extI 1 1
+extC 
+extS 1 1 1
+extP 1 1 1

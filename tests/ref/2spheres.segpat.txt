@@ -1,0 +1,12 @@
+nsegment 0
+M 2
+SA 1 0
+SA 2 0
+nloops 0
+LPI 1 0 0
+LPI 2 0 0
+npatches 2
+PT 1 1 1 -1
+PT 2 1 2 -1
+PTI 1 1 1
+PTI 2 2 2

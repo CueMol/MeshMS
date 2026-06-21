@@ -1,0 +1,7 @@
+nV 3060
+nF 3452
+area 260.214141864
+signed_volume 285.995315654
+watertight 0
+boundary_edges 2300
+nonmanifold_edges 0
