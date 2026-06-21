@@ -414,12 +414,17 @@ FillResult fill_small_holes(const std::vector<Vec3>& V, const std::vector<Tri>& 
 }
 
 FlapResult remove_nonmanifold_flaps(const std::vector<Vec3>& V, const std::vector<Tri>& F,
-                                    int passes) {
+                                    int passes, std::vector<std::uint32_t>* kept_orig) {
   FlapResult out;
   out.V = V;
   std::vector<Tri> cur = F;
+  // Original-face indices carried alongside `cur` so a parallel per-face array can
+  // be filtered to the survivors. Identity until a pass actually drops faces.
+  std::vector<std::uint32_t> idx(cur.size());
+  for (std::size_t i = 0; i < idx.size(); ++i) idx[i] = static_cast<std::uint32_t>(i);
   if (F.empty()) {
     out.F = cur;
+    if (kept_orig) kept_orig->clear();
     return out;
   }
 
@@ -482,14 +487,21 @@ FlapResult remove_nonmanifold_flaps(const std::vector<Vec3>& V, const std::vecto
     if (drop.empty()) break;
 
     std::vector<Tri> kept;
+    std::vector<std::uint32_t> kept_idx;
     kept.reserve(cur.size());
+    kept_idx.reserve(cur.size());
     for (std::size_t i = 0; i < cur.size(); ++i) {
-      if (!drop.count(static_cast<int>(i))) kept.push_back(cur[i]);
+      if (!drop.count(static_cast<int>(i))) {
+        kept.push_back(cur[i]);
+        kept_idx.push_back(idx[i]);
+      }
     }
     cur = std::move(kept);
+    idx = std::move(kept_idx);
   }
 
   out.F = std::move(cur);
+  if (kept_orig) *kept_orig = std::move(idx);
   return out;
 }
 

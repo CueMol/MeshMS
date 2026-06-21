@@ -41,6 +41,12 @@ struct MeshResult {
   // refers to xyzr[i-1] -- the (i-1)-th entry of the input array the caller
   // passed. The caller maps this index back to its own atom id.
   std::vector<std::uint32_t> atom_id;
+  // Per-face SES component type, aligned with faces (MSMS face-type codes):
+  //   3 = convex (contact), 2 = concave (spherical reentrant),
+  //   1 = toroidal (toric reentrant).
+  // Populated by build_*; carried (filtered) through remove_flaps. Empty after
+  // close_cusps, which rebuilds faces (fan-fill), so the types no longer apply.
+  std::vector<std::uint8_t> face_type;
 };
 
 // Compute the density-independent RS components from an atom array. xyzr[a] is
@@ -73,10 +79,12 @@ const char* version();
 // small open boundary cycles. This is the heavy "fully closed" option.
 // NOTE: welding merges vertices of possibly different owners, so the returned
 // atom_id is EMPTY -- per-vertex atom ownership is not preserved across a weld.
+// face_type is likewise EMPTY: the fan-fill adds faces with no SES component.
 MeshResult close_cusps(const MeshResult& mesh, double weld_tol = 1e-4);
 
 // Drop spurious doubled-"flap" (non-manifold) triangles; a no-op on a clean
-// mesh. Vertices are left untouched, so atom_id is carried through unchanged.
+// mesh. Vertices are left untouched, so atom_id is carried through unchanged;
+// face_type is filtered to the surviving faces (stays aligned with faces).
 MeshResult remove_flaps(const MeshResult& mesh, int passes = 4);
 
 // Area-weighted per-vertex outward normals from (verts, faces): for each face

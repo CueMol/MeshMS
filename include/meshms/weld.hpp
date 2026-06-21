@@ -75,11 +75,17 @@ FillResult fill_small_holes(const std::vector<Vec3>& V, const std::vector<Tri>& 
 // ONLY off that edge (every face at the apex contains the edge) is a flap; the
 // apex's whole face fan is dropped. Repeats until no non-manifold edge or no
 // flap remains. Not a coordinate weld; removes nothing on a clean mesh.
+//
+// kept_orig (optional): when non-null, receives the original index (into F) of
+// every surviving face, aligned with the returned F, so the caller can filter a
+// parallel per-face array (e.g. SES face type). Pure output add-on; F is unchanged
+// whether or not it is passed.
 struct FlapResult {
   std::vector<Vec3> V;
   std::vector<Tri> F;
 };
 FlapResult remove_nonmanifold_flaps(const std::vector<Vec3>& V, const std::vector<Tri>& F,
-                                    int passes = 4);
+                                    int passes = 4,
+                                    std::vector<std::uint32_t>* kept_orig = nullptr);
 
 }  // namespace meshms

@@ -62,7 +62,7 @@ inline Cell cell_of(const Vec3& v, double inv) {
 std::tuple<std::vector<Vec3>, std::vector<Tri>, std::vector<int32_t>> fuse_by_id(
     const std::vector<Vec3>& V, const std::vector<Tri>& F,
     const std::vector<TagList>& tags, const std::vector<int32_t>& atom_id,
-    double eps) {
+    double eps, std::vector<std::uint32_t>* kept_faces) {
   const std::size_t n = V.size();
   const bool have_aid = !atom_id.empty();
 
@@ -168,13 +168,15 @@ std::tuple<std::vector<Vec3>, std::vector<Tri>, std::vector<int32_t>> fuse_by_id
   // --- remap faces, dropping degenerate (two equal indices) -------------------
   std::vector<Tri> F2;
   F2.reserve(F.size());
-  for (const Tri& f : F) {
+  for (std::size_t fi = 0; fi < F.size(); ++fi) {
+    const Tri& f = F[fi];
     std::int64_t na = o2n[static_cast<std::size_t>(f[0])];
     std::int64_t nb = o2n[static_cast<std::size_t>(f[1])];
     std::int64_t nc = o2n[static_cast<std::size_t>(f[2])];
     if (na == nb || nb == nc || nc == na) continue;
     F2.push_back(Tri{static_cast<int32_t>(na), static_cast<int32_t>(nb),
                      static_cast<int32_t>(nc)});
+    if (kept_faces) kept_faces->push_back(static_cast<std::uint32_t>(fi));
   }
 
   return {std::move(V2), std::move(F2), std::move(atom_id2)};

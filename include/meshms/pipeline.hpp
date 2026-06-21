@@ -48,6 +48,11 @@ struct Surface {
   std::vector<Vec3> N;             // per-face normals (empty after fuse)
   std::vector<Vec3> NV;            // per-vertex normals (always populated)
   std::vector<int32_t> atom_id;    // per-vertex owning atom (1-based, 0=unknown)
+  // Per-face SES component type, aligned with F (MSMS face-type codes):
+  //   3 = convex (contact), 2 = concave (spherical reentrant),
+  //   1 = toroidal (toric reentrant). Stays aligned through orient_faces and the
+  //   fuse degenerate-drop. Always populated by build_mesh.
+  std::vector<uint8_t> ftype;
 };
 
 // Density-independent "RS components": everything in the SAS arrangement that

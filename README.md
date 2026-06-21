@@ -43,7 +43,8 @@ std::vector<std::array<double,4>> atoms = /* {x,y,z,radius} per atom */;
 
 // One-shot: build the SES mesh (fuse=true => welded, watertight C1 surface).
 MeshResult m = build_surface_from_array(atoms, /*probe=*/1.4, /*mesh_size=*/0.5, /*fuse=*/true);
-// m.verts, m.vnormals, m.faces (0-based triangles), m.atom_id (per-vertex owner).
+// m.verts, m.vnormals, m.faces (0-based triangles), m.atom_id (per-vertex owner),
+// m.face_type (per-face SES component: 3=convex, 2=concave, 1=toroidal; MSMS codes).
 
 // Multi-density: precompute the geometry once, mesh cheaply at many densities.
 auto rs = compute_rs_from_array(atoms, 1.4);
@@ -67,19 +68,27 @@ finish and validate a surface:
 
 `MeshResult` always carries `vnormals` (per-vertex normals) and, on the build and
 `remove_flaps` paths, `atom_id` (1-based per-vertex owning atom; value `i` refers
-to `atoms[i-1]`, `0` = unknown) so a consumer can colour the surface by atom.
+to `atoms[i-1]`, `0` = unknown) so a consumer can colour the surface by atom, plus
+`face_type` (per-face SES component, aligned with `faces`: `3` convex/contact,
+`2` concave/spherical-reentrant, `1` toroidal — the MSMS face-type codes; carried
+through `remove_flaps`, empty after `close_cusps`).
 
 ## CLI
 
 ```sh
-meshms_cli INPUT.xyzr -o OUT.ply [--probe 1.4] [--mesh-size 0.5]
-           [--no-fuse] [--fuse-cusps] [--weld-tol 1e-4] [--vertex-normals] [-v]
+meshms_cli INPUT.xyzr -o OUT [--probe 1.4] [--mesh-size 0.5]
+           [--no-fuse] [--fuse-cusps] [--weld-tol 1e-4] [--ply] [--vertex-normals] [-v]
 ```
 
-`meshms_cli` reads an `xyzr` file, builds the surface, and writes an ASCII PLY.
-It is implemented entirely on top of `<meshms/capi.hpp>` (argument/PLY/xyzr I/O
-and reporting are the only things it does itself) — the worked example of
-consuming libMeshMS the way cuemol2/3 does.
+`meshms_cli` reads an `xyzr` file, builds the surface, and writes it. The **default
+output is the MSMS `.vert`/`.face` pair** (`<OUT>.vert` + `<OUT>.face`; any
+`.vert`/`.face`/`.ply` suffix on `OUT` is stripped to form the base name) — each
+vertex line is `x y z  nx ny nz  0  closest_sphere  vertex_type` and each face line
+`v1 v2 v3 (1-based)  face_type  0`, with the SES component in `closest_sphere`
+(= `atom_id`) and the type fields. `--ply` (or an `OUT` ending in `.ply`) writes a
+single ASCII PLY instead. It is implemented entirely on top of `<meshms/capi.hpp>`
+(argument/PLY/MSMS/xyzr I/O and reporting are the only things it does itself) — the
+worked example of consuming libMeshMS the way cuemol2/3 does.
 
 ## Status & validation
 

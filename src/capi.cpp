@@ -55,6 +55,7 @@ MeshResult to_result(const Surface& s) {
   }
   r.atom_id.reserve(s.atom_id.size());
   for (std::int32_t a : s.atom_id) r.atom_id.push_back(static_cast<std::uint32_t>(a));
+  r.face_type = s.ftype;  // per-face SES type, aligned with faces
   return r;
 }
 
@@ -146,12 +147,19 @@ MeshResult close_cusps(const MeshResult& mesh, double weld_tol) {
 }
 
 MeshResult remove_flaps(const MeshResult& mesh, int passes) {
-  FlapResult fl = remove_nonmanifold_flaps(to_vec3(mesh.verts), to_tri(mesh.faces), passes);
+  std::vector<std::uint32_t> kept;
+  FlapResult fl =
+      remove_nonmanifold_flaps(to_vec3(mesh.verts), to_tri(mesh.faces), passes, &kept);
   MeshResult r;
   r.verts = from_vec3(fl.V);
   r.faces = from_tri(fl.F);
   r.vnormals = from_vec3(vnormals_from_faces(fl.V, fl.F));
   r.atom_id = mesh.atom_id;  // remove_nonmanifold_flaps keeps V intact -> ids align
+  // Filter face_type to the surviving faces (kept holds original indices into faces).
+  if (!mesh.face_type.empty()) {
+    r.face_type.reserve(kept.size());
+    for (std::uint32_t k : kept) r.face_type.push_back(mesh.face_type[k]);
+  }
   return r;
 }
 
