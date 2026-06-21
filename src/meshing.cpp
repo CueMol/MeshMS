@@ -1,4 +1,4 @@
-// Advancing-front spherical patch mesher --- faithful port of meshms/meshing.py.
+// Advancing-front spherical patch mesher --- faithful port of the meshing module.
 //
 // BYTE-FRAGILE port: every scalar `x ** 2` -> pysq(); every float term / eval
 // order reproduced with the vec3 helpers; the EXACT comparison order and tie-

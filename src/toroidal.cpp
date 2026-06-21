@@ -1,4 +1,4 @@
-// Faithful port of meshms/toroidal.py data_SEStorpat() (geometry + mesh path).
+// Faithful port of the toroidal module's data_SEStorpat() (geometry + mesh path).
 //
 // See toroidal.hpp for the faithfulness contract. The local-function structure
 // of the Python module is preserved: _sqrt_pos, coord_toroide, index_P_toroide,

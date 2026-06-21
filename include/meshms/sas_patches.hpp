@@ -1,6 +1,6 @@
 #pragma once
 // SAS segments, loops and spherical patches --- faithful port of
-// meshms/sas_patches.py data_Seg_Pat() (MESH PATH ONLY, want_area=False).
+// the sas_patches module's data_Seg_Pat() (MESH PATH ONLY, want_area=False).
 //
 // The want_area block (mod_seg_loop_cir + area_spherical + DataAV + segment0 +
 // Area_sphpat) is DEAD in the mesh path and is DEFERRED here (see the want_area

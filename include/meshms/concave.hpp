@@ -1,5 +1,5 @@
 #pragma once
-// Concave SES patch construction --- faithful port of meshms/concave.py
+// Concave SES patch construction --- faithful port of the concave module's
 // SESconcavepat (MESH PATH ONLY, av=None).
 //
 // Meshes the concave (probe-reentrant) SES patches into a MeshState. The mesh is

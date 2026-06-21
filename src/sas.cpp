@@ -1,7 +1,7 @@
-// Faithful port of meshms/sas.py data_I_Cir(). Float term/eval order is kept
+// Faithful port of the sas module's data_I_Cir(). Float term/eval order is kept
 // identical to the numpy expressions (via the vec3 helpers) so the triple-point
 // topology and circle set match the Python to the last branch. Storage follows
-// CPP_PORT_DESIGN.md §2 (append / per-atom CSR / jagged) -- the OOM-wall fix.
+// the append / per-atom CSR / jagged layout -- the OOM-wall fix.
 //
 // PARALLELISM (S6, ParallelSAS): the per-atom i-loop is split into two phases.
 // PHASE 1 is '#pragma omp parallel for' over i=1..M and is fully READ-ONLY on

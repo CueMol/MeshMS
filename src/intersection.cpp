@@ -1,10 +1,10 @@
-// Faithful port of meshms/intersection.py interstructure().
+// Faithful port of the intersection module's interstructure().
 //
 // Differences vs Python (semantics identical):
 //   - The result is emitted DIRECTLY as a CSR (Neighbors): off is a prefix sum
 //     of per-atom counts, val is the concatenation of the ascending neighbour
 //     lists. We never materialise the dense (M+1, kmax+1) M_int rectangle
-//     (CPP_PORT_DESIGN.md §2.1, the OOM-wall fix).
+//     (the OOM-wall fix).
 //   - Cell binning uses std::floor then cast to int64 (NEVER int() truncation),
 //     matching np.floor(...).astype(np.int64) for negative coordinates.
 #include "meshms/intersection.hpp"

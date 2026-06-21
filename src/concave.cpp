@@ -1,4 +1,4 @@
-// Concave SES patch construction --- faithful port of meshms/concave.py
+// Concave SES patch construction --- faithful port of the concave module's
 // SESconcavepat (MESH PATH ONLY, av=None). See concave.hpp for scope.
 #include "meshms/concave.hpp"
 

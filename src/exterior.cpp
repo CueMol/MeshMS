@@ -1,7 +1,7 @@
-// Faithful port of meshms/exterior.py data_ext() (the _owner reverse-index code
+// Faithful port of the exterior module's data_ext() (the _owner reverse-index code
 // path). See exterior.hpp for the algorithm overview.
 //
-// The module-level neighbor_patch() helper in exterior.py is DEAD (defined but
+// The module-level neighbor_patch() helper in the exterior module is DEAD (defined but
 // never called by data_ext) and is intentionally NOT ported.
 #include "meshms/exterior.hpp"
 
@@ -65,7 +65,7 @@ Ext data_ext(const Geom& geom, const Neighbors& /*nb*/, const DataI& data_i,
   // ================================================================
   // neighbor[j] records all neighbour patches to the j-th spherical patch.
   // Size the width to the true maximum per-patch boundary element count
-  // (sum of loop sizes + number of circles) --- matches exterior.py.
+  // (sum of loop sizes + number of circles) --- matches the exterior module.
   int max_boundary = 1;
   for (int i = 1; i <= M; ++i) {
     if (patches_index[static_cast<std::size_t>(i)][0] > 0) {

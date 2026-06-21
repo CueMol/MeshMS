@@ -1,11 +1,18 @@
 #pragma once
-// Public, C++17-safe facade for the meshms_core SES mesher.
+// Public, C++17-safe facade for the MeshMS (libMeshMS) SES surface mesher.
 //
-// This is the ONLY header an external consumer (e.g. cuemol2, BALL) needs to
-// include. It deliberately includes NONE of the internal meshms headers (which
-// require C++20: vec3.hpp uses <numbers>, etc.) -- only standard-library headers
-// that are valid in C++17. A C++17 program can therefore include this header and
-// link the (C++20-built) static library directly.
+// This is the ONLY header an external consumer needs to include; cuemol2/cuemol3
+// is the primary consumer. It deliberately includes NONE of the internal meshms
+// headers (which require C++20: vec3.hpp uses <numbers>, etc.) -- only standard-
+// library headers that are valid in C++17. A C++17 program can therefore include
+// this header and link the (C++20-built) libMeshMS static library directly.
+//
+// The whole API lives in namespace meshms and trades only in std types
+// (std::vector / std::array / std::uint32_t), so no MeshMS-internal type ever
+// crosses the boundary. Beyond meshing, it exposes the post-processing
+// (close_cusps, remove_flaps), the diagnostics (analyze_mesh,
+// boundary_diagnostics) and the normal recompute (vertex_normals) a consumer
+// needs to finish and validate a surface.
 //
 // Usage:
 //   * One-shot:  build_surface_from_array(xyzr, Rp, mesh_size, fuse)
@@ -53,5 +60,70 @@ MeshResult build_mesh_from_cache(const std::shared_ptr<RSCache>& rs,
 MeshResult build_surface_from_array(
     const std::vector<std::array<double, 4>>& xyzr, double radius_probe,
     double mesh_size, bool fuse = false);
+
+// Library version string, e.g. "0.1.0". Safe to call at any time.
+const char* version();
+
+// ===== Mesh post-processing =================================================
+// Each takes a MeshResult and returns a new one. vnormals in the result are
+// recomputed (area-weighted) from the returned geometry, so they stay valid.
+
+// Close cusp/singular seams into a watertight 2-manifold: weld near-coincident
+// boundary vertices (round(v / weld_tol) integer-key buckets), then fan-fill the
+// small open boundary cycles. This is the heavy "fully closed" option.
+// NOTE: welding merges vertices of possibly different owners, so the returned
+// atom_id is EMPTY -- per-vertex atom ownership is not preserved across a weld.
+MeshResult close_cusps(const MeshResult& mesh, double weld_tol = 1e-4);
+
+// Drop spurious doubled-"flap" (non-manifold) triangles; a no-op on a clean
+// mesh. Vertices are left untouched, so atom_id is carried through unchanged.
+MeshResult remove_flaps(const MeshResult& mesh, int passes = 4);
+
+// Area-weighted per-vertex outward normals from (verts, faces): for each face
+// accumulate cross(b - a, c - a) onto its three vertices, then normalize. This
+// is the same normal the post-processing above fills in; exposed for callers
+// that edit the mesh themselves and need to refresh the normals afterwards.
+std::vector<std::array<double, 3>> vertex_normals(
+    const std::vector<std::array<double, 3>>& verts,
+    const std::vector<std::array<std::uint32_t, 3>>& faces);
+
+// ===== Mesh diagnostics =====================================================
+
+// Whole-mesh quality report: edge incidence, watertightness, area and volume.
+struct MeshReport {
+  std::uint32_t n_vertices = 0;
+  std::uint32_t n_faces = 0;
+  std::uint32_t degenerate_faces = 0;   // repeated index or |cross| < 1e-12
+  std::uint32_t duplicate_faces = 0;    // same vertex triple seen more than once
+  std::uint32_t boundary_edges = 0;     // edges used by exactly one face
+  std::uint32_t nonmanifold_edges = 0;  // edges used by >= 3 faces
+  bool watertight = false;              // boundary == 0 && nonmanifold == 0 && nF > 0
+  double area = 0.0;                    // sum of triangle areas
+  double signed_volume = 0.0;           // divergence-theorem signed volume
+};
+MeshReport analyze_mesh(const MeshResult& mesh);
+
+// One connected component of the boundary-edge subgraph (a hole/seam).
+struct BoundaryLoopInfo {
+  std::uint32_t n_verts = 0;
+  std::uint32_t n_edges = 0;
+  bool closed = false;               // every member has exactly 2 boundary neighbours
+  std::array<double, 3> centroid{};  // mean of the component's vertex coordinates
+};
+
+// A non-manifold edge (u, v) shared by `count` >= 3 faces.
+struct NonmanifoldEdgeInfo {
+  std::uint32_t u = 0;
+  std::uint32_t v = 0;
+  std::uint32_t count = 0;
+};
+
+// Localize open boundaries/holes and non-manifold edges (the CLI -v diagnostics).
+// loops are sorted largest-first by n_edges; nonmanifold keeps first-seen order.
+struct BoundaryDiagnostics {
+  std::vector<BoundaryLoopInfo> loops;
+  std::vector<NonmanifoldEdgeInfo> nonmanifold;
+};
+BoundaryDiagnostics boundary_diagnostics(const MeshResult& mesh);
 
 }  // namespace meshms

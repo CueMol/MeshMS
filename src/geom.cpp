@@ -1,4 +1,4 @@
-// Faithful port of meshms/geom.py (read_xyzr, jitter_centers).
+// Faithful port of the geom module (read_xyzr, jitter_centers).
 #include "meshms/geom.hpp"
 
 #include <cctype>

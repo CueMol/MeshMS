@@ -1,5 +1,5 @@
 #pragma once
-// Run parameters --- faithful port of meshms/params.py (Para dataclass).
+// Run parameters --- faithful port of the params module (Para dataclass).
 namespace meshms {
 
 struct Para {

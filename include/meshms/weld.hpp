@@ -1,5 +1,5 @@
 #pragma once
-// Vertex welding + boundary/flap repair --- faithful port of meshms/weld.py.
+// Vertex welding + boundary/flap repair --- faithful port of the weld module.
 //
 // The patch meshers emit each spherical/toroidal patch independently, so
 // adjacent patches duplicate vertices along shared boundary arcs. These

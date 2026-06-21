@@ -1,6 +1,6 @@
 #pragma once
 // Convex (SAS->SES contracted) spherical SES patch construction --- faithful port
-// of meshms/convex.py data_SESsphpat_convex (MESH PATH ONLY, ext unused).
+// of the convex module's data_SESsphpat_convex (MESH PATH ONLY, ext unused).
 //
 // Per atom i it slices the loops / patches built on the SAS (DataLoop/DataPat),
 // rebuilds the direction-corrected local loops_i0, the global segment0 record

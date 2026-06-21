@@ -1,5 +1,5 @@
 #pragma once
-// Molecule geometry and xyzr input --- faithful port of meshms/geom.py.
+// Molecule geometry and xyzr input --- faithful port of the geom module.
 //
 // 1-based indexing with a dummy padding row 0: centers[i]/R[i] refer to atom i
 // for i in 1..M (PORTING_CONTRACT.md). Row 0 is left zero.
@@ -21,7 +21,7 @@ struct Geom {
 Geom read_xyzr(const std::string& path);
 
 // Return a copy of geom with atom centers displaced by a Gaussian of std
-// `magnitude` (symmetry-breaking perturbation; see geom.py jitter_centers).
+// `magnitude` (symmetry-breaking perturbation; see geom's jitter_centers).
 //
 // NOTE: this CANNOT bit-match numpy's PCG64 + ziggurat normal sampler. It is
 // ONLY the degenerate-symmetry fallback (e.g. fullerene) and is never used for

@@ -1,4 +1,4 @@
-// Faithful port of meshms/fusion.py fuse_by_id (warn=False pipeline path).
+// Faithful port of the fusion module's fuse_by_id (warn=False pipeline path).
 #include "meshms/fusion.hpp"
 
 #include <cmath>

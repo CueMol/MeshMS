@@ -1,5 +1,5 @@
 #pragma once
-// ID-based boundary vertex fusion --- faithful port of meshms/fusion.py
+// ID-based boundary vertex fusion --- faithful port of the fusion module's
 // fuse_by_id (the warn=False pipeline path only).
 //
 // Each patch mesher tags every boundary vertex with the SES primitive(s) it lies

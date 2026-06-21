@@ -1,6 +1,6 @@
 #pragma once
 // ASCII PLY writer/reader for the triangulated SES mesh --- faithful port of
-// meshms/ply.py. Vertices are TRUE coordinates (no positivity shift); face
+// the ply module. Vertices are TRUE coordinates (no positivity shift); face
 // indices are 0-based; normals are an optional per-vertex property.
 #include <string>
 #include <vector>

@@ -1,11 +1,11 @@
 #pragma once
 // Intersection structure between SAS balls --- faithful port of
-// meshms/intersection.py interstructure().
+// the intersection module's interstructure().
 //
 // Two SAS balls a, b (radii R+Rp) intersect iff
 //     dist(c_a, c_b) < (R_a + Rp) + (R_b + Rp).
 // Reproduces the +/-2 spatial-hash search of the Python and emits the result
-// directly as a CSR (CPP_PORT_DESIGN.md §2.1) instead of the Python dense
+// directly as a CSR instead of a dense
 // (M+1, kmax+1) rectangle. Each row is strictly ascending-unique.
 #include "meshms/csr.hpp"
 #include "meshms/geom.hpp"

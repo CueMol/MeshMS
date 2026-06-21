@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 project(MeshMS LANGUAGES CXX)
 
-# --- C++20, faithful port of the Python molsurf SES pipeline -----------------
-# See PORTING_CONTRACT.md (semantics, 1-based-with-dummy-row-0 indexing) and
+# --- C++20 implementation of the MolSurfComp SES algorithm -------------------
+# See PORTING_CONTRACT.md (indexing & data-layout conventions) and
 # OPTIMIZATION.md (the 28-core, output-preserving parallel design).
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

@@ -1,10 +1,10 @@
 #pragma once
-// Fused scalar length-3 vector math --- faithful port of meshms/mathutil.py.
+// Fused scalar length-3 vector math --- faithful port of the mathutil module.
 //
 // The float evaluation order is kept identical to the numpy helpers (same term
 // order in dot/cross/circlecenter) so the C++ port reproduces the Python result
 // to the last ULP wherever the algorithm is the same. This is the deliberate
-// "scalar fused len-3, no Eigen" choice of CPP_PORT_DESIGN.md §1.4: it dissolves
+// "scalar fused len-3, no Eigen" choice: it dissolves
 // the Python numpy-dispatch self-time at zero cost AND keeps the evaluation order
 // under our control (a hard requirement of the advancing-front faithfulness trap).
 #include <cmath>
