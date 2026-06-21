@@ -1,5 +1,5 @@
 #pragma once
-// Contiguous in-memory triangle mesh (CPP_PORT_DESIGN.md §5): the OpenGL-ready
+// Contiguous in-memory triangle mesh: the OpenGL-ready
 // vertex/index buffers that MeshState accumulates into. Faces are 0-based, like
 // the Python MeshState.to_arrays() output.
 #include <array>

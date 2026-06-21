@@ -1,4 +1,4 @@
-// Faithful port of meshms/pipeline.py (geometry path).
+// Faithful port of the pipeline module (geometry path).
 #include "meshms/pipeline.hpp"
 
 #include <stdexcept>

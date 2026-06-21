@@ -1,5 +1,5 @@
 #pragma once
-// Standalone mesh validation oracle --- faithful port of tests/check_mesh.py.
+// Standalone mesh validation oracle --- faithful port of the mesh-check oracle.
 // Edge-incidence statistics, watertightness, degenerate/duplicate faces, total
 // surface area and signed volume. Used to gate SES mesh quality (the §5
 // equivalence gate). Indexing here is the 0-based PLY/mesh convention.
@@ -10,7 +10,7 @@
 
 namespace meshms {
 
-// 0.5 * sum |(b-a) x (c-a)|  (mesh_area in check_mesh.py).
+// 0.5 * sum |(b-a) x (c-a)|  (mesh_area in the mesh-check oracle).
 double mesh_area(const std::vector<Vec3>& V, const std::vector<Tri>& F);
 
 // sum a . (b x c) / 6  (signed_volume by the divergence theorem).

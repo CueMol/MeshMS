@@ -1,6 +1,6 @@
 #pragma once
 // Toroidal SES patches: regular thin tori (mesh_toroide) and singular cusp tori
-// (mesh_cusp) --- faithful port of meshms/toroidal.py data_SEStorpat().
+// (mesh_cusp) --- faithful port of the toroidal module's data_SEStorpat().
 //
 // Every patch is accumulated UNCONDITIONALLY into the shared MeshState (the
 // MATLAB ext/int figure routing only chooses a figure; both branches mesh, so

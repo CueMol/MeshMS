@@ -26,7 +26,7 @@ int main() {
   CHECK(g.centers[0].x == 0.0 && g.centers[0].y == 0.0 && g.centers[0].z == 0.0);
   CHECK(g.R[0] == 0.0);
 
-  // Para defaults match params.py.
+  // Para defaults match the params module.
   Para p;
   CHECK_NEAR(p.radius_probe, 1.4, 0.0);
   CHECK_NEAR(p.mesh_size, 0.5, 0.0);

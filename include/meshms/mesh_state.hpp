@@ -1,5 +1,5 @@
 #pragma once
-// Global mesh accumulator (faithful port of meshms/mesh_state.py): the running
+// Global mesh accumulator (faithful port of the mesh_state module): the running
 // vertex / triangle / per-face-normal / per-vertex-tag lists that every patch
 // mesher (mesh_sphpat, visutorpat, ...) pushes into via add_patch.
 //

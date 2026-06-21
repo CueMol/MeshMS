@@ -1,4 +1,4 @@
-// Faithful port of meshms/sas_patches.py data_Seg_Pat() (MESH PATH, want_area
+// Faithful port of the sas_patches module's data_Seg_Pat() (MESH PATH, want_area
 // =False) and its helpers interiorloop / loopconstruct / patchesconstruct /
 // TreeNode. The float term/eval order, np.argsort(kind="stable") ->
 // std::stable_sort, np.clip-then-arccos and pysq() (Python scalar `x ** 2`) are

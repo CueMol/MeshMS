@@ -1,4 +1,4 @@
-// Faithful port of meshms/ply.py ASCII PLY writer + matching reader.
+// Faithful port of the ply module's ASCII PLY writer + matching reader.
 #include "meshms/ply.hpp"
 
 #include <cstdio>

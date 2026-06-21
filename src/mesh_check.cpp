@@ -1,9 +1,9 @@
-// Faithful port of tests/check_mesh.py mesh oracle (mesh_area, signed_volume,
+// Faithful port of the mesh-check oracle (mesh_area, signed_volume,
 // manifold_report). Per-triangle float term/eval order matches the numpy helpers
 // in vec3.hpp. The OUTER reduction is a sequential left-to-right sum rather than
 // numpy's pairwise summation, so the totals drift from the Python by ~1e-16
 // relative on the golden meshes -- far inside the equivalence gate (counts exact;
-// area/volume within ~1e-6 relative, CPP_PORT_PLAN §5). The C++ port is gated on
+// area/volume within ~1e-6 relative). The C++ port is gated on
 // equivalence, NOT byte-identity, so this reduction-order difference is expected.
 #include "meshms/mesh_check.hpp"
 

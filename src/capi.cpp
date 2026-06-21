@@ -2,14 +2,17 @@
 // meshms_core (C++20); only the HEADER is constrained to C++17.
 #include "meshms/capi.hpp"
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <utility>
 
 #include "meshms/geom.hpp"
 #include "meshms/mesh.hpp"
+#include "meshms/mesh_check.hpp"
 #include "meshms/pipeline.hpp"
 #include "meshms/vec3.hpp"
+#include "meshms/weld.hpp"
 
 namespace meshms {
 
@@ -55,6 +58,59 @@ MeshResult to_result(const Surface& s) {
   return r;
 }
 
+// MeshResult arrays -> internal Vec3/Tri (the inverse of to_result's copy).
+std::vector<Vec3> to_vec3(const std::vector<std::array<double, 3>>& verts) {
+  std::vector<Vec3> V;
+  V.reserve(verts.size());
+  for (const std::array<double, 3>& v : verts) V.push_back(Vec3{v[0], v[1], v[2]});
+  return V;
+}
+std::vector<Tri> to_tri(const std::vector<std::array<std::uint32_t, 3>>& faces) {
+  std::vector<Tri> F;
+  F.reserve(faces.size());
+  for (const std::array<std::uint32_t, 3>& f : faces)
+    F.push_back(Tri{static_cast<std::int32_t>(f[0]), static_cast<std::int32_t>(f[1]),
+                    static_cast<std::int32_t>(f[2])});
+  return F;
+}
+std::vector<std::array<double, 3>> from_vec3(const std::vector<Vec3>& V) {
+  std::vector<std::array<double, 3>> out;
+  out.reserve(V.size());
+  for (const Vec3& v : V) out.push_back({v.x, v.y, v.z});
+  return out;
+}
+std::vector<std::array<std::uint32_t, 3>> from_tri(const std::vector<Tri>& F) {
+  std::vector<std::array<std::uint32_t, 3>> out;
+  out.reserve(F.size());
+  for (const Tri& f : F)
+    out.push_back({static_cast<std::uint32_t>(f[0]), static_cast<std::uint32_t>(f[1]),
+                   static_cast<std::uint32_t>(f[2])});
+  return out;
+}
+
+// Area-weighted per-vertex normals: cross(b-a, c-a) accumulated per vertex, then
+// normalized. Term-for-term identical to ply.vertex_normals_from_faces so the
+// CLI's --vertex-normals output is unchanged.
+std::vector<Vec3> vnormals_from_faces(const std::vector<Vec3>& V,
+                                      const std::vector<Tri>& F) {
+  std::vector<Vec3> Nv(V.size(), Vec3{});
+  for (const Tri& f : F) {
+    const Vec3& a = V[static_cast<std::size_t>(f[0])];
+    const Vec3& b = V[static_cast<std::size_t>(f[1])];
+    const Vec3& c = V[static_cast<std::size_t>(f[2])];
+    Vec3 fn = cross(b - a, c - a);  // magnitude == 2 * triangle area
+    Nv[static_cast<std::size_t>(f[0])] = Nv[static_cast<std::size_t>(f[0])] + fn;
+    Nv[static_cast<std::size_t>(f[1])] = Nv[static_cast<std::size_t>(f[1])] + fn;
+    Nv[static_cast<std::size_t>(f[2])] = Nv[static_cast<std::size_t>(f[2])] + fn;
+  }
+  for (Vec3& nv : Nv) {
+    double len = std::sqrt(pysq(nv.x) + pysq(nv.y) + pysq(nv.z));
+    if (len == 0.0) len = 1.0;
+    nv = nv / len;
+  }
+  return Nv;
+}
+
 }  // namespace
 
 std::shared_ptr<RSCache> compute_rs_from_array(
@@ -74,6 +130,73 @@ MeshResult build_surface_from_array(
     double mesh_size, bool fuse) {
   RSComponents rs = compute_rs(geom_from_array(xyzr), radius_probe);
   return to_result(build_mesh(rs, mesh_size, fuse));
+}
+
+// version() is defined in version.cpp (declared in capi.hpp).
+
+MeshResult close_cusps(const MeshResult& mesh, double weld_tol) {
+  WeldResult w = weld(to_vec3(mesh.verts), to_tri(mesh.faces), weld_tol);
+  FillResult fh = fill_small_holes(w.V, w.F);
+  MeshResult r;
+  r.verts = from_vec3(fh.V);
+  r.faces = from_tri(fh.F);
+  r.vnormals = from_vec3(vnormals_from_faces(fh.V, fh.F));
+  // atom_id intentionally left empty: the weld merges vertices of different owners.
+  return r;
+}
+
+MeshResult remove_flaps(const MeshResult& mesh, int passes) {
+  FlapResult fl = remove_nonmanifold_flaps(to_vec3(mesh.verts), to_tri(mesh.faces), passes);
+  MeshResult r;
+  r.verts = from_vec3(fl.V);
+  r.faces = from_tri(fl.F);
+  r.vnormals = from_vec3(vnormals_from_faces(fl.V, fl.F));
+  r.atom_id = mesh.atom_id;  // remove_nonmanifold_flaps keeps V intact -> ids align
+  return r;
+}
+
+std::vector<std::array<double, 3>> vertex_normals(
+    const std::vector<std::array<double, 3>>& verts,
+    const std::vector<std::array<std::uint32_t, 3>>& faces) {
+  return from_vec3(vnormals_from_faces(to_vec3(verts), to_tri(faces)));
+}
+
+MeshReport analyze_mesh(const MeshResult& mesh) {
+  ManifoldReport rep = manifold_report(to_vec3(mesh.verts), to_tri(mesh.faces));
+  MeshReport out;
+  out.n_vertices = static_cast<std::uint32_t>(rep.n_vertices);
+  out.n_faces = static_cast<std::uint32_t>(rep.n_faces);
+  out.degenerate_faces = static_cast<std::uint32_t>(rep.degenerate_faces);
+  out.duplicate_faces = static_cast<std::uint32_t>(rep.duplicate_faces);
+  out.boundary_edges = static_cast<std::uint32_t>(rep.boundary_edges);
+  out.nonmanifold_edges = static_cast<std::uint32_t>(rep.nonmanifold_edges);
+  out.watertight = rep.watertight;
+  out.area = rep.area;
+  out.signed_volume = rep.signed_volume;
+  return out;
+}
+
+BoundaryDiagnostics boundary_diagnostics(const MeshResult& mesh) {
+  BoundaryLoopsResult res = boundary_loops(to_vec3(mesh.verts), to_tri(mesh.faces));
+  BoundaryDiagnostics out;
+  out.loops.reserve(res.loops.size());
+  for (const BoundaryLoop& L : res.loops) {
+    BoundaryLoopInfo info;
+    info.n_verts = static_cast<std::uint32_t>(L.n_verts);
+    info.n_edges = static_cast<std::uint32_t>(L.n_edges);
+    info.closed = L.closed;
+    info.centroid = {L.centroid.x, L.centroid.y, L.centroid.z};
+    out.loops.push_back(info);
+  }
+  out.nonmanifold.reserve(res.nonmanifold.size());
+  for (const NonmanifoldEdge& e : res.nonmanifold) {
+    NonmanifoldEdgeInfo info;
+    info.u = static_cast<std::uint32_t>(e.u);
+    info.v = static_cast<std::uint32_t>(e.v);
+    info.count = static_cast<std::uint32_t>(e.count);
+    out.nonmanifold.push_back(info);
+  }
+  return out;
 }
 
 }  // namespace meshms

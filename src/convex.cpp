@@ -1,6 +1,6 @@
 // Convex (SAS->SES contracted) spherical SES patch construction --- faithful port
-// of meshms/convex.py data_SESsphpat_convex, INCLUDING mod_seg_loop_cir (from
-// sas_patches.py lines 260-353, deferred there in the want_area block) ported as a
+// of the convex module's data_SESsphpat_convex, INCLUDING mod_seg_loop_cir (from
+// the sas_patches module lines 260-353, deferred there in the want_area block) ported as a
 // free function. See convex.hpp for scope. MESH PATH ONLY (ext unused).
 #include "meshms/convex.hpp"
 

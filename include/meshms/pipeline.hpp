@@ -1,5 +1,5 @@
 #pragma once
-// End-to-end SES construction driver --- faithful port of meshms/pipeline.py.
+// End-to-end SES construction driver --- faithful port of the pipeline module.
 //
 // Wires the already-ported geometry/meshing stages together in the MATLAB order:
 //   interstructure -> data_I_Cir -> data_Seg_Pat -> data_ext
@@ -15,7 +15,7 @@
 // orient_faces the boundary vertices sharing a tag are welded by union-find, and
 // the per-face normals N are dropped (Python `return V, F, None`).
 //
-// OUT OF SCOPE (stubbed, see pipeline.py): the build_surface "auto" NaN-retry
+// OUT OF SCOPE (stubbed, see the pipeline module): the build_surface "auto" NaN-retry
 // jitter fallback (numpy-RNG-dependent, never triggered by the golden molecules;
 // build_surface uses faithful coords == jitter=None semantics, noted as a TODO).
 #include <cstdint>

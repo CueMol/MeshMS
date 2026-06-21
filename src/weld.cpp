@@ -1,4 +1,4 @@
-// Faithful port of meshms/weld.py (minus manifold_report, which lives in
+// Faithful port of the weld module (minus manifold_report, which lives in
 // mesh_check.hpp). Python dicts / defaultdicts preserve INSERTION order, and the
 // component/cycle/flap walks depend on that order, so every map here is backed by
 // an insertion-ordered structure (a vector of entries + a lookup index) and every

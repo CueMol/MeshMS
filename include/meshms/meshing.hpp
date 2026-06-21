@@ -1,5 +1,5 @@
 #pragma once
-// Advancing-front spherical patch mesher --- faithful port of meshms/meshing.py
+// Advancing-front spherical patch mesher --- faithful port of the meshing module
 // (Mesh_Generation/mesh_sphpat.m, advancing_front_approach.m, compute_NV.m,
 // activefront.m).
 //

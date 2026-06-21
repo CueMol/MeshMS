@@ -1,4 +1,4 @@
-// Cross-check the weld.py post-processing routines (weld, boundary_loops,
+// Cross-check the weld module's post-processing routines (weld, boundary_loops,
 // remove_nonmanifold_flaps, fill_small_holes) against the Python golden
 // <case>.weld.txt.
 //
@@ -11,7 +11,7 @@
 //   flap           -- a doubled flap dropped by remove_nonmanifold_flaps (then the
 //                     exposed perimeter is fan-filled).
 // The real meshes come from the C++ build_surface; the synthetic meshes are
-// reconstructed here byte-for-byte from dump_weld.py.
+// reconstructed here byte-for-byte from the reference dump.
 //
 // PASS criterion: at every stage nV/nF EXACT, F exact 0-based topology, V within
 // 1e-9; boundary_loops loop count / per-loop (n_edges,n_verts,closed,vids) and
@@ -219,7 +219,7 @@ void check_loops(const std::string& cs, const char* which,
   }
 }
 
-// --- synthetic meshes (must match dump_weld.py byte-for-byte) ----------------
+// --- synthetic meshes (must match the reference dump byte-for-byte) ----------------
 
 void make_annulus(std::vector<Vec3>& V, std::vector<Tri>& F) {
   V.clear();

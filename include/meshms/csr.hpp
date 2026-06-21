@@ -1,7 +1,7 @@
 #pragma once
-// CSR (compressed-sparse-row) neighbour lists --- the OOM-wall fix of
-// CPP_PORT_DESIGN.md §2.1: per-atom ragged storage instead of the Python
-// global-kmax dense rectangle M_int[(M+1, kmax+1)].
+// CSR (compressed-sparse-row) neighbour lists --- the OOM-wall fix:
+// per-atom ragged storage instead of a global-kmax dense rectangle
+// M_int[(M+1, kmax+1)].
 #include <cstddef>
 #include <cstdint>
 #include <span>

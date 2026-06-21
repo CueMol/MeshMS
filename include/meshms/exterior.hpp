@@ -1,5 +1,5 @@
 #pragma once
-// Exterior (eSAS) extraction --- faithful port of meshms/exterior.py data_ext().
+// Exterior (eSAS) extraction --- faithful port of the exterior module's data_ext().
 //
 // Classifies which spherical patches, segments, circles and intersection points
 // lie on the *exterior* solvent-accessible surface:
@@ -12,7 +12,7 @@
 //   4. Mark segments/circles bounding exterior patches, then the intersection
 //      points on exterior segments.
 //
-// NOTE: the module-level neighbor_patch() helper in exterior.py is DEAD (defined
+// NOTE: the module-level neighbor_patch() helper in the exterior module is DEAD (defined
 // but never called by data_ext --- data_ext uses the _owner reverse index). It is
 // therefore NOT ported here.
 //
@@ -36,7 +36,7 @@ struct Ext {
   std::vector<int32_t> patch;    // (npatches+1) ext_patch[k]
 };
 
-// Port of data_ext.m / exterior.py data_ext.
+// Port of data_ext.m / the exterior module's data_ext.
 Ext data_ext(const Geom& geom, const Neighbors& nb, const DataI& data_i,
              const DataCir& data_c, const DataSeg& data_seg,
              const DataLoop& data_loop, const DataPat& data_pat, double Rp);

@@ -1,4 +1,4 @@
-// Smoke test for the vec3 numerical core (faithful to meshms/mathutil.py).
+// Smoke test for the vec3 numerical core (faithful to the mathutil module).
 #include "meshms/vec3.hpp"
 
 #include "test_util.hpp"
