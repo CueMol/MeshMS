@@ -31,7 +31,6 @@ jobs:
         include:
           - { os: ubuntu-latest,  deplibs: deplibs_Linux_X64.tar.bz2,   advisory: false }
           - { os: macos-latest,   deplibs: deplibs_macOS_ARM64.tar.bz2, advisory: true  } # ARM64
-          - { os: macos-13,       deplibs: deplibs_macOS_X64.tar.bz2,   advisory: true  } # Intel
           - { os: windows-latest, deplibs: deplibs_Windows_X64.tar.bz2, advisory: true  }
     steps:
       - uses: actions/checkout@v4
