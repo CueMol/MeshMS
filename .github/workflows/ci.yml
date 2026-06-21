@@ -1,0 +1,124 @@
+name: CI
+
+# Build MeshMS on Linux / macOS / Windows. The build is the hard gate on every OS;
+# the full ctest golden suite gates only on Linux (the 1e-9 geometry oracle is tuned
+# to GCC+glibc libm). On macOS/Windows ctest runs but is advisory (continue-on-error),
+# because transcendental rounding (acos/sqrt) can diverge at the last ULP on a
+# different libm even with FMA contraction disabled. Integer/topology checks are exact
+# and portable; only the floating-geometry compare is libm-sensitive.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # --- TBB build: oneTBB from the cuemol2 deplibs bundle (production parity) -----
+  build-tbb:
+    name: tbb / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  deplibs: deplibs_Linux_X64.tar.bz2,   advisory: false }
+          - { os: macos-latest,   deplibs: deplibs_macOS_ARM64.tar.bz2, advisory: true  } # ARM64
+          - { os: macos-13,       deplibs: deplibs_macOS_X64.tar.bz2,   advisory: true  } # Intel
+          - { os: windows-latest, deplibs: deplibs_Windows_X64.tar.bz2, advisory: true  }
+    steps:
+      - uses: actions/checkout@v4
+
+      # CMake + Ninja on all three runners (Ninja is not guaranteed on the macOS image).
+      - name: Set up CMake and Ninja
+        uses: lukka/get-cmake@latest
+
+      # Put cl.exe / the MSVC toolchain env on PATH so the Ninja generator uses MSVC
+      # (Ninja + MSVC on every OS -- never the Visual Studio generator).
+      - name: Set up MSVC environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Cache deplibs (TBB 2023.0.0)
+        id: deplibs-cache
+        uses: actions/cache@v4
+        with:
+          path: deplibs
+          # version + OS-specific asset in the key: a future deplibs bump rebuilds
+          # the cache instead of serving stale TBB, and caches never cross OSes.
+          key: deplibs-v0.0.9-${{ matrix.deplibs }}
+
+      # One recipe for all OSes: the Windows runner's tar is bsdtar and handles bzip2.
+      - name: Fetch deplibs
+        if: steps.deplibs-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          url="https://github.com/CueMol/build_scripts/releases/download/v0.0.9/${{ matrix.deplibs }}"
+          mkdir -p deplibs
+          curl -fL "$url" -o deplibs.tar.bz2
+          tar -xjf deplibs.tar.bz2 -C deplibs
+          ls deplibs/target/tbb-2023.0.0/lib/cmake/TBB/   # hard-assert the exact version dir
+
+      # Point CMAKE_PREFIX_PATH at the bundle root (target/); find_package(TBB CONFIG)
+      # locates the versioned tbb-2023.0.0 subdir. CMake accepts the Windows path as-is.
+      - name: Configure
+        shell: bash
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DMESHMS_TBB=ON
+          -DCMAKE_PREFIX_PATH="${{ github.workspace }}/deplibs/target"
+
+      - name: Build
+        shell: bash
+        run: cmake --build build -j
+
+      - name: Test (gating on Linux, advisory on macOS/Windows)
+        shell: bash
+        continue-on-error: ${{ matrix.advisory }}
+        run: ctest --test-dir build --output-on-failure
+
+  # --- Serial build: dependency-free fallback (-DMESHMS_TBB=OFF) -----------------
+  build-serial:
+    name: serial / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  advisory: false }
+          - { os: macos-latest,   advisory: true  }
+          - { os: windows-latest, advisory: true  }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up CMake and Ninja
+        uses: lukka/get-cmake@latest
+
+      - name: Set up MSVC environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Configure (serial, no TBB)
+        shell: bash
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DMESHMS_TBB=OFF
+
+      - name: Build
+        shell: bash
+        run: cmake --build build -j
+
+      - name: Test (gating on Linux, advisory on macOS/Windows)
+        shell: bash
+        continue-on-error: ${{ matrix.advisory }}
+        run: ctest --test-dir build --output-on-failure
