@@ -101,3 +101,67 @@ resolution so the small-molecule MSMS values are coarse; MSMS is a single-thread
 so MeshMS wins on BOTH a faster serial baseline and 28-core parallelism. (MSMS additionally
 computes analytic area/volume by default — disabled here via `-no_area` for a meshing-only
 comparison; MeshMS defers analytic area/volume entirely in this build.)
+
+## Round 2 (2026-08): output-preserving micro/structural pass
+
+A second optimization pass, gated exactly like the first: all golden ctest green on
+BOTH the TBB and the serial (`-DMESHMS_TBB=OFF`) build, plus FNV-hash snapshots of
+V/F/N/NV/atom_id/ftype on 8 large molecules (carbo 6609 / ubch5b 2364 /
+glutaredoxin 1276 / 101M / barstar / 1B17 / 1crn / 1GZI; d=0.5 and 0.25, fuse
+on/off) bit-identical before and after every change, on both builds. Measured on an
+8-core Apple M-series (best-of-N; the MolSurfComp UFF-radius set, which is
+neighbour-denser than the 101M-style xyzr set, so `data_I_Cir` dominates more).
+
+What landed (all output-preserving):
+
+- **pipeline**: MeshState arrays moved (not copied) into Surface; `orient_faces`
+  parallel per face.
+- **mesh_check**: ordered maps -> hash maps (uint64 edge keys); core templated so
+  `manifold_report`/`boundary_loops` gained facade-layout overloads -- the capi
+  `analyze_mesh`/`boundary_diagnostics` no longer convert the whole mesh.
+- **weld**: `fill_small_holes`/`remove_nonmanifold_flaps` take V by value and move
+  it through (V was copied unchanged).
+- **MeshState**: merge-phase `reserve_extra` (sizes pre-summed from the LocalMesh
+  slots) and an `add_patch` overload that MOVES the per-vertex TagLists.
+- **toroidal**: exact `T` reserves; the per-face analytic normal fused into the
+  face-orientation loop (the intermediate `normal` array is gone).
+- **data_I_Cir**: `Rext/Rext2 = R+Rp / pysq(R+Rp)` tables (pysq is a real libm
+  `pow` on GCC -- Apple clang folds it, so this line item pays on the Linux/GCC
+  targets); the coverage pre-loop's `sqrt(1-ctheta^2)*dist_a` / `pysq(ctheta*dist_a)`
+  cached per row and reused by the whole-circle test; integer guards before the
+  discarded norms in the Y1/Y2 loops.
+- **data_ext**: owner map-of-maps -> flat 2-slot arrays; dense neighbor rectangle
+  -> CSR. Stage -70%.
+- **data_Seg_Pat**: `interiorloop` per-atom precompute (unit vectors, second acos
+  term, alpha2 -- all point-independent); tree sets moved + reserved; the atom loop
+  split into a serial segment pass and a **parallel per-atom loop/patch pass**
+  (satom[a] is complete once atom a's rows are done) with a serial ascending-i
+  merge. Stage -30..-38% (TBB).
+- **convex**: the per-atom full-size `segment0`/`Rj` alloc+memset (O(M x nsegment)
+  per build) replaced by persistent thread_local scratch -- no clearing needed
+  because every read row is rewritten per atom. Stage -50%.
+- **concave**: `build_neighbors` parallel per probe (fixed slots, no merge).
+- **RS cache (feature)**: the density-independent concave probe decomposition is
+  now precomputed into `RSComponents` (`precompute_concave` -> `ConcaveDecomp`;
+  `SESconcavepat_mesh` re-meshes it), so multi-density `build_mesh` calls skip it.
+- **fuse_by_id**: two-phase -- complete flat (tag,cell) grid, then PARALLEL
+  per-vertex partner discovery (j<i pairs: the identical pair set and float
+  expression), then a serial union replay; the union-find partition is
+  order-independent (component root == minimum member), so the output is
+  bit-identical.
+
+Tried and REVERTED (serial A/B showed a regression): caching sweep-1 distances /
+flags for sweep 2 of the advancing front (+8..19% on convex/concave -- the
+per-iteration scratch fills outweigh the rarely-taken recomputes).
+
+End-to-end effect (TBB, 8 cores, best-of-7, d=0.5): total -17..-28% (101M
+17.6 -> 13.5 ms, barstar 13.3 -> 10.3 ms, carbo 141 -> 117 ms); d=0.25 -13..-21%.
+Serial totals -5..-8% (dominated by `data_I_Cir`, whose float work is already
+minimal under clang's pow folding). Per-density re-mesh from a cached RS
+(`build_mesh` only): **fuse=true -48..-60%** (101M d=0.5: 42.5 -> 18.0 ms, carbo:
+103.5 -> 41.0 ms), fuse=false -5..-11%.
+
+Remaining levers: the `data_I_Cir` coverage/verification loops (a margin-guarded
+triangle-inequality prune is outcome-safe but was not attempted); an advancing-front
+ring buffer for the O(Nt x Nae) front copies in `addnewpoint_sphere`; hoisting the
+(small, post-fix) convex `mod_seg_loop_cir` slice work into the RS cache.
