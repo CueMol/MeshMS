@@ -20,6 +20,9 @@
 #include <cstddef>
 #include <numeric>
 #include <stdexcept>
+#include <utility>
+
+#include "meshms/parallel.hpp"
 
 #include "meshms/vec3.hpp"
 
@@ -55,30 +58,71 @@ inline double alpha_local(int direct, const Vec3& u, const Vec3& v, const Vec3& 
 // (Python cols 1..8). loop is the 1-based loop vector (loop[1..loopsize] = global
 // segment ids; loop[0] dummy). center == geom.centers, I == data_i.I.
 // ----------------------------------------------------------------------------
-int interiorloop(const Vec3& point, const Vec3& ci, const std::vector<Vec3>& center,
-                 double ri, int i, const std::vector<int32_t>& loop, int loopsize,
-                 const std::vector<Vec3>& I,
-                 const std::vector<std::array<int32_t, 5>>& segment,
-                 const std::vector<std::array<double, 8>>& ncrasegment) {
-  int nearest = 0;
-  double theta0 = 0.0;
+// Per-loop precompute for interiorloop: every quantity that depends only on the
+// atom and the loop ELEMENT (not on `point`) -- the unit vector u1 towards the
+// other atom, the other-atom id, the second acos term B, alpha2, and the
+// point-independent alpha_local inputs. interiorloop was re-evaluating all of
+// these on every call (once per set element per tree node); precomputing them
+// once per atom substitutes bit-identical values (same expressions, same
+// inputs) and changes nothing else.
+struct LoopPre {
+  std::vector<Vec3> u1;        // (center[j]-ci)/norm(center[j]-ci), [0] dummy
+  std::vector<int32_t> jat;    // other atom of element k
+  std::vector<double> B;       // acos_clamped(dot(v2, u1*ri)/pysq(ri))
+  std::vector<double> alpha2;  // alpha_local(direct, p3-A, p4-A, n)
+  std::vector<int32_t> direct; // segment[loop[k], 5]
+  std::vector<Vec3> p3A;       // p3 - A
+  std::vector<Vec3> n;         // ncrasegment[loop[k], 1:4]
+};
+
+LoopPre build_loop_pre(int i, const Vec3& ci, double ri,
+                       const std::vector<int32_t>& loop, int loopsize,
+                       const std::vector<Vec3>& center,
+                       const std::vector<Vec3>& I,
+                       const std::vector<std::array<int32_t, 5>>& segment,
+                       const std::vector<std::array<double, 8>>& ncrasegment) {
+  LoopPre pk;
+  pk.u1.assign(static_cast<std::size_t>(loopsize) + 1, Vec3{});
+  pk.jat.assign(static_cast<std::size_t>(loopsize) + 1, 0);
+  pk.B.assign(static_cast<std::size_t>(loopsize) + 1, 0.0);
+  pk.alpha2.assign(static_cast<std::size_t>(loopsize) + 1, 0.0);
+  pk.direct.assign(static_cast<std::size_t>(loopsize) + 1, 0);
+  pk.p3A.assign(static_cast<std::size_t>(loopsize) + 1, Vec3{});
+  pk.n.assign(static_cast<std::size_t>(loopsize) + 1, Vec3{});
   for (int k = 1; k <= loopsize; ++k) {
     const auto& seg = segment[static_cast<std::size_t>(loop[static_cast<std::size_t>(k)])];
-    int j;
-    if (seg[0] == i) {  // segment[loop[k], 1] == i
-      j = seg[1];
-    } else {
-      j = seg[0];
-    }
+    const auto& ncra = ncrasegment[static_cast<std::size_t>(loop[static_cast<std::size_t>(k)])];
+    int j = (seg[0] == i) ? seg[1] : seg[0];
+    Vec3 u1 = (center[static_cast<std::size_t>(j)] - ci) /
+              norm(center[static_cast<std::size_t>(j)] - ci);
+    Vec3 v1 = u1 * ri;  // == (center[j]-ci)/norm(center[j]-ci) * ri exactly
+    Vec3 v2 = I[static_cast<std::size_t>(seg[2])] - ci;
+    Vec3 n{ncra[0], ncra[1], ncra[2]};
+    Vec3 A{ncra[3], ncra[4], ncra[5]};
+    Vec3 p3 = I[static_cast<std::size_t>(seg[2])];
+    Vec3 p4 = I[static_cast<std::size_t>(seg[3])];
+    pk.u1[static_cast<std::size_t>(k)] = u1;
+    pk.jat[static_cast<std::size_t>(k)] = j;
+    pk.B[static_cast<std::size_t>(k)] = acos_clamped(dot(v2, v1) / pysq(ri));
+    pk.alpha2[static_cast<std::size_t>(k)] = alpha_local(seg[4], p3 - A, p4 - A, n);
+    pk.direct[static_cast<std::size_t>(k)] = seg[4];
+    pk.p3A[static_cast<std::size_t>(k)] = p3 - A;
+    pk.n[static_cast<std::size_t>(k)] = n;
+  }
+  return pk;
+}
 
-    Vec3 v1 = (center[static_cast<std::size_t>(j)] - ci) /
-                  norm(center[static_cast<std::size_t>(j)] - ci) * ri;
-    Vec3 v2 = I[static_cast<std::size_t>(seg[2])] - ci;  // I[segment[loop[k], 3]] - ci
-    Vec3 v3 = point - ci;
+int interiorloop(const Vec3& point, const Vec3& ci, double ri, int loopsize,
+                 const LoopPre& pk, std::vector<int>& K) {
+  int nearest = 0;
+  double theta0 = 0.0;
+  // v3 and pysq(ri) are iteration-invariant (identical value every k).
+  const Vec3 v3 = point - ci;
+  const double ri2 = pysq(ri);
+  for (int k = 1; k <= loopsize; ++k) {
+    const Vec3 v1 = pk.u1[static_cast<std::size_t>(k)] * ri;
     // theta = arccos(clip(dot(v3,v1)/ri**2)) - arccos(clip(dot(v2,v1)/ri**2))
-    double theta = acos_clamped(dot(v3, v1) / pysq(ri)) -
-                   acos_clamped(dot(v2, v1) / pysq(ri));
-
+    double theta = acos_clamped(dot(v3, v1) / ri2) - pk.B[static_cast<std::size_t>(k)];
     if (k == 1 || theta < theta0) {
       theta0 = theta;
       nearest = k;
@@ -86,53 +130,26 @@ int interiorloop(const Vec3& point, const Vec3& ci, const std::vector<Vec3>& cen
   }
 
   // K[] collects the loop entries whose "other atom" j == j_nearest.
-  std::vector<int> K(static_cast<std::size_t>(loopsize) + 1, 0);  // [0] dummy
+  K.assign(static_cast<std::size_t>(loopsize) + 1, 0);  // [0] dummy
   int nK = 0;
-  int j_nearest;
-  {
-    const auto& segn = segment[static_cast<std::size_t>(loop[static_cast<std::size_t>(nearest)])];
-    if (segn[0] == i) {
-      j_nearest = segn[1];
-    } else {
-      j_nearest = segn[0];
-    }
-  }
-
+  const int j_nearest = pk.jat[static_cast<std::size_t>(nearest)];
   for (int k = 1; k <= loopsize; ++k) {
-    const auto& seg = segment[static_cast<std::size_t>(loop[static_cast<std::size_t>(k)])];
-    int j;
-    if (seg[0] == i) {
-      j = seg[1];
-    } else {
-      j = seg[0];
-    }
-    if (j == j_nearest) {
+    if (pk.jat[static_cast<std::size_t>(k)] == j_nearest) {
       ++nK;
       K[static_cast<std::size_t>(nK)] = k;
     }
   }
 
-  int j = j_nearest;
-
-  Vec3 v1 = (center[static_cast<std::size_t>(j)] - ci) /
-                norm(center[static_cast<std::size_t>(j)] - ci);
-  Vec3 v3 = point - ci;
+  // pk.u1[nearest] IS (center[j_nearest]-ci)/norm(center[j_nearest]-ci).
+  const Vec3& v1 = pk.u1[static_cast<std::size_t>(nearest)];
   Vec3 v = v3 - dot(v1, v3) * v1;
 
   for (int k0 = 1; k0 <= nK; ++k0) {
     int k = K[static_cast<std::size_t>(k0)];
-    const auto& seg = segment[static_cast<std::size_t>(loop[static_cast<std::size_t>(k)])];
-    const auto& ncra = ncrasegment[static_cast<std::size_t>(loop[static_cast<std::size_t>(k)])];
-
-    int direct = seg[4];                         // segment[loop[k], 5]
-    Vec3 n{ncra[0], ncra[1], ncra[2]};           // ncrasegment[loop[k], 1:4]
-    Vec3 A{ncra[3], ncra[4], ncra[5]};           // ncrasegment[loop[k], 4:7]
-    Vec3 p3 = I[static_cast<std::size_t>(seg[2])];   // I[segment[loop[k], 3]]
-    Vec3 p4 = I[static_cast<std::size_t>(seg[3])];   // I[segment[loop[k], 4]]
-    double alpha1 = alpha_local(direct, p3 - A, v, n);
-    double alpha2 = alpha_local(direct, p3 - A, p4 - A, n);
-
-    if (alpha1 < alpha2) {
+    double alpha1 = alpha_local(pk.direct[static_cast<std::size_t>(k)],
+                                pk.p3A[static_cast<std::size_t>(k)], v,
+                                pk.n[static_cast<std::size_t>(k)]);
+    if (alpha1 < pk.alpha2[static_cast<std::size_t>(k)]) {
       return 1;
     }
   }
@@ -245,18 +262,53 @@ PatchResult patchesconstruct(int i, const std::vector<Vec3>& C,
   res.patches.emplace_back();  // patches[0] dummy
   int npatches = 0;
 
+  const Vec3 ci = C[static_cast<std::size_t>(i)];
+  const double ri = R[static_cast<std::size_t>(i)] + Rp;
+
+  // Per-atom precompute: everything the tree walk below re-evaluated per node
+  // that depends only on the atom and a loop/circle entry. Identical
+  // expressions, evaluated once.
+  std::vector<LoopPre> pre(static_cast<std::size_t>(nloops_i) + 1);
+  std::vector<Vec3> loop_point(static_cast<std::size_t>(nloops_i) + 1, Vec3{});
+  for (int k = 1; k <= nloops_i; ++k) {
+    const std::vector<int32_t>& loopk = loops_i[static_cast<std::size_t>(k)];
+    const int lsz = static_cast<int>(loopk.size()) - 1;
+    pre[static_cast<std::size_t>(k)] =
+        build_loop_pre(i, ci, ri, loopk, lsz, C, I, segment, ncrasegment);
+    // point = I[segment[loops_i[k, 1], 3]]
+    const int seg0 = loopk[1];
+    loop_point[static_cast<std::size_t>(k)] =
+        I[static_cast<std::size_t>(segment[static_cast<std::size_t>(seg0)][2])];
+  }
+  std::vector<Vec3> circle_point(static_cast<std::size_t>(ncircleindex_i) + 1, Vec3{});
+  for (int t = 1; t <= ncircleindex_i; ++t) {
+    const int cidx = circleindex_i[static_cast<std::size_t>(t)];
+    const auto& crow = circle[static_cast<std::size_t>(cidx)];
+    Vec3 cnorm{crow[6], crow[7], crow[8]};   // circle[cidx, 6:9]
+    auto [vector1, v2unused] = orthogonalvectors(cnorm);
+    (void)v2unused;
+    Vec3 ccenter{crow[3], crow[4], crow[5]};  // circle[cidx, 3:6]
+    double cr = crow[9];                      // circle[cidx, 9]
+    circle_point[static_cast<std::size_t>(t)] = ccenter + cr * vector1;
+  }
+  std::vector<int> Kscratch;  // interiorloop K[] buffer, reused across calls
+
   // S0 = [1, 2, ..., nloops_i, -1, -2, ..., -ncircleindex_i]
   std::vector<int32_t> S0;
+  S0.reserve(static_cast<std::size_t>(nloops_i + ncircleindex_i));
   for (int t = 1; t <= nloops_i; ++t) S0.push_back(t);
   for (int t = 1; t <= ncircleindex_i; ++t) S0.push_back(-t);
 
-  // Tree workspace (1-based; index 0 dummy). Grows as needed.
+  // Tree workspace (1-based; index 0 dummy). Reserved to its maximum size (the
+  // walk adds at most 2 nodes per iteration of the 2N+1 loop) so growth never
+  // reallocates; sets are MOVED into nodes (they are dead at the source after).
   std::vector<TreeNode> tree;
+  tree.reserve(static_cast<std::size_t>(2 * (nloops_i + ncircleindex_i) + 4));
   tree.emplace_back();  // dummy slot at index 0
   tree.emplace_back();  // tree[1]
   tree[1].activenode = 1;
-  tree[1].set = S0;
   tree[1].activeelement = S0.empty() ? 0 : S0[0];
+  tree[1].set = std::move(S0);
   tree[1].n1 = nloops_i;
   tree[1].n2 = ncircleindex_i;
 
@@ -287,19 +339,16 @@ PatchResult patchesconstruct(int i, const std::vector<Vec3>& C,
       if (k > 0) {
         const std::vector<int32_t>& loopk = loops_i[static_cast<std::size_t>(k)];
         const int loopsize_k = static_cast<int>(loopk.size()) - 1;  // drop [0] dummy
-        const Vec3 ci = C[static_cast<std::size_t>(i)];
-        const double ri = R[static_cast<std::size_t>(i)] + Rp;
+        const LoopPre& pk = pre[static_cast<std::size_t>(k)];
 
         // loop entries (1..n1)
         for (int s1 = 1; s1 <= tree[static_cast<std::size_t>(j)].n1; ++s1) {
           int Ss1 = S[static_cast<std::size_t>(s1 - 1)];
-          // point = I[segment[loops_i[Ss1, 1], 3]]
-          int seg0 = loops_i[static_cast<std::size_t>(Ss1)][1];  // loops_i[Ss1, 1]
-          Vec3 point = I[static_cast<std::size_t>(segment[static_cast<std::size_t>(seg0)][2])];
+          // point = I[segment[loops_i[Ss1, 1], 3]] (precomputed per loop)
+          const Vec3& point = loop_point[static_cast<std::size_t>(Ss1)];
 
           if (k == Ss1 ||
-              interiorloop(point, ci, C, ri, i, loopk, loopsize_k, I, segment,
-                           ncrasegment)) {
+              interiorloop(point, ci, ri, loopsize_k, pk, Kscratch)) {
             S1.push_back(Ss1);
             ++left_n1;
             if (t1 == 1 && Ss1 > k) {
@@ -321,17 +370,10 @@ PatchResult patchesconstruct(int i, const std::vector<Vec3>& C,
              s2 <= tree[static_cast<std::size_t>(j)].n1 + tree[static_cast<std::size_t>(j)].n2;
              ++s2) {
           int Ss2 = S[static_cast<std::size_t>(s2 - 1)];
-          int cidx = circleindex_i[static_cast<std::size_t>(-Ss2)];  // circleindex_i[-Ss2]
-          const auto& crow = circle[static_cast<std::size_t>(cidx)];
-          Vec3 cnorm{crow[6], crow[7], crow[8]};   // circle[cidx, 6:9]
-          auto [vector1, v2unused] = orthogonalvectors(cnorm);
-          (void)v2unused;
-          Vec3 ccenter{crow[3], crow[4], crow[5]};  // circle[cidx, 3:6]
-          double cr = crow[9];                      // circle[cidx, 9]
-          Vec3 point = ccenter + cr * vector1;
+          // point precomputed per circle entry (circleindex_i[-Ss2])
+          const Vec3& point = circle_point[static_cast<std::size_t>(-Ss2)];
 
-          if (interiorloop(point, ci, C, ri, i, loopk, loopsize_k, I, segment,
-                           ncrasegment)) {
+          if (interiorloop(point, ci, ri, loopsize_k, pk, Kscratch)) {
             S1.push_back(Ss2);
             ++left_n2;
             if (t1 == 1) {
@@ -363,7 +405,7 @@ PatchResult patchesconstruct(int i, const std::vector<Vec3>& C,
           ++ntree;
           tree.emplace_back();
           tree[static_cast<std::size_t>(ntree)].activenode = 1;
-          tree[static_cast<std::size_t>(ntree)].set = S1;
+          tree[static_cast<std::size_t>(ntree)].set = std::move(S1);  // S1 dead after
           tree[static_cast<std::size_t>(ntree)].activeelement = k1;
           tree[static_cast<std::size_t>(ntree)].n1 = left_n1;
           tree[static_cast<std::size_t>(ntree)].n2 = left_n2;
@@ -372,7 +414,7 @@ PatchResult patchesconstruct(int i, const std::vector<Vec3>& C,
           ++ntree;
           tree.emplace_back();
           tree[static_cast<std::size_t>(ntree)].activenode = 1;
-          tree[static_cast<std::size_t>(ntree)].set = S2;
+          tree[static_cast<std::size_t>(ntree)].set = std::move(S2);  // S2 dead after
           tree[static_cast<std::size_t>(ntree)].activeelement = k2;
           tree[static_cast<std::size_t>(ntree)].n1 = right_n1;
           tree[static_cast<std::size_t>(ntree)].n2 = right_n2;
@@ -463,7 +505,17 @@ std::tuple<DataSeg, DataLoop, DataPat> data_Seg_Pat(const Geom& geom,
   dp.patch_atom.assign(1, 0);                                          // patch_atom[0] dummy
   int npatches = 0;
 
-  // nsatom counter per atom (== ds.satom[a].size()); maintained alongside.
+  // ---- PASS 1 (serial): segment creation for every atom -------------------
+  // Split from the loop/patch construction below: every segment touching atom a
+  // is created at atom min(i,j) <= a, so satom[a] is complete once atom a's own
+  // row scan finishes; the loop/patch code for atom a reads only ds rows listed
+  // in satom[a], all of which the old interleaved order had already created.
+  // The split is therefore byte-identical, and it makes PASS 2 per-atom
+  // independent (parallelizable with a serial ascending-i merge).
+  // Scratch buffers reused across (i,row): every element is (re)assigned before
+  // use, so contents match the old per-iteration fresh vectors exactly.
+  std::vector<double> alpha1, alpha2;
+  std::vector<int> order, pointord;
   for (int i = 1; i <= M; ++i) {
     const int Ri = Row(i);
     for (int row = 1; row <= Ri; ++row) {
@@ -501,7 +553,7 @@ std::tuple<DataSeg, DataLoop, DataPat> data_Seg_Pat(const Geom& geom,
         }
 
         // angles relative to start point (1-based; alpha1[1] == 0 implicit).
-        std::vector<double> alpha1(static_cast<std::size_t>(npt) + 1, 0.0);
+        alpha1.assign(static_cast<std::size_t>(npt) + 1, 0.0);
         Vec3 Isp = I[static_cast<std::size_t>(spoint)];
         for (int k = 2; k <= npt; ++k) {
           // alpha(direct, I[spoint]-A, I[point[k-1]]-A, nij). Python point[] is
@@ -513,15 +565,15 @@ std::tuple<DataSeg, DataLoop, DataPat> data_Seg_Pat(const Geom& geom,
         }
 
         // STABLE argsort of alpha1[1..npt]; order is 1-based (+1).
-        std::vector<int> order(static_cast<std::size_t>(npt));  // 0-based indices into [1..npt]
+        order.resize(static_cast<std::size_t>(npt));  // 0-based indices into [1..npt]
         std::iota(order.begin(), order.end(), 0);
         std::stable_sort(order.begin(), order.end(), [&](int a, int b) {
           return alpha1[static_cast<std::size_t>(a + 1)] < alpha1[static_cast<std::size_t>(b + 1)];
         });
 
         // alpha2[1..npt] = alpha1[order]; point reordered (icirc[order]).
-        std::vector<double> alpha2(static_cast<std::size_t>(npt) + 1, 0.0);
-        std::vector<int> pointord(static_cast<std::size_t>(npt));  // reordered point ids (0-based)
+        alpha2.assign(static_cast<std::size_t>(npt) + 1, 0.0);
+        pointord.resize(static_cast<std::size_t>(npt));  // reordered point ids (0-based)
         for (int t = 0; t < npt; ++t) {
           alpha2[static_cast<std::size_t>(t + 1)] = alpha1[static_cast<std::size_t>(order[static_cast<std::size_t>(t)] + 1)];
           pointord[static_cast<std::size_t>(t)] = icirc[static_cast<std::size_t>(order[static_cast<std::size_t>(t)])];
@@ -543,56 +595,82 @@ std::tuple<DataSeg, DataLoop, DataPat> data_Seg_Pat(const Geom& geom,
         }
       }
     }
+  }
 
-    // --- loop construction on the i-th SAS-ball -------------------------------
+  // ---- PASS 2 (parallel per atom): loop + patch construction --------------
+  // Reads only PASS-1 outputs (all const from here) plus the const inputs, and
+  // writes only its own per_atom slot; the serial ascending-i merge below then
+  // replays the exact accumulation (numbering included) of the old interleaved
+  // loop. Same LocalMesh-style pattern as the mesher drivers.
+  struct AtomLP {
     std::vector<std::vector<int32_t>> loops_i;  // [k] 1-based; [0] dummy
     int nloops_i = 0;
+    bool has_loops = false;    // nsatom_i > 0: contributes to dl
+    bool has_patches = false;  // nsatom_i > 0 || ncircleindex(i) > 0
+    PatchResult pr;
+  };
+  std::vector<AtomLP> per_atom(static_cast<std::size_t>(M) + 1);
+
+  meshms::parallel_for(1, M + 1, [&](int i) {
+    AtomLP& out = per_atom[static_cast<std::size_t>(i)];
     const int nsatom_i = static_cast<int>(ds.satom[static_cast<std::size_t>(i)].size());
 
+    // --- loop construction on the i-th SAS-ball ----------------------------
     if (nsatom_i > 0) {
       // satom[i] is 0-based here; loopconstruct wants 1-based sa with [0] dummy.
       std::vector<int32_t> sa_i;
+      sa_i.reserve(static_cast<std::size_t>(nsatom_i) + 1);
       sa_i.push_back(0);  // [0] dummy
       for (int32_t id : ds.satom[static_cast<std::size_t>(i)]) sa_i.push_back(id);
 
       LoopResult lr = loopconstruct(i, sa_i, nsatom_i, ds.segment);
-      loops_i = std::move(lr.loops);
-      nloops_i = lr.nloops;
-
-      // accumulate into global loops; loops_index[i] = [start, end].
-      for (int k = 1; k <= nloops_i; ++k) {
-        dl.loops.push_back(loops_i[static_cast<std::size_t>(k)]);
-      }
-      dl.loops_index[static_cast<std::size_t>(i)][0] = nloops + 1;
-      dl.loops_index[static_cast<std::size_t>(i)][1] = nloops + nloops_i;
-      nloops += nloops_i;
+      out.loops_i = std::move(lr.loops);
+      out.nloops_i = lr.nloops;
+      out.has_loops = true;
     } else if (ncircleindex(i) > 0) {
       // loops_i = [] -> a single dummy row.
-      loops_i.emplace_back();  // loops_i[0] dummy
-      nloops_i = 0;
+      out.loops_i.emplace_back();  // loops_i[0] dummy
+      out.nloops_i = 0;
     }
 
-    // --- patch construction ---------------------------------------------------
+    // --- patch construction ------------------------------------------------
     if (nsatom_i > 0 || ncircleindex(i) > 0) {
       // circleindex[i] is 0-based; patchesconstruct wants 1-based with [0] dummy.
       std::vector<int32_t> circleindex_i;
+      circleindex_i.reserve(circleindex[static_cast<std::size_t>(i)].size() + 1);
       circleindex_i.push_back(0);  // [0] dummy
       for (int32_t cid : circleindex[static_cast<std::size_t>(i)]) circleindex_i.push_back(cid);
 
-      PatchResult pr = patchesconstruct(i, C, R, ds.segment, ds.ncrasegment, I,
-                                        circle, circleindex_i, ncircleindex(i),
-                                        loops_i, nloops_i, Rp);
-
-      for (int k = 1; k <= pr.npatches; ++k) {
-        dp.patches.push_back(pr.patches[static_cast<std::size_t>(k)]);
-        dp.patch_atom.push_back(i);
-      }
-      dp.patches_index[static_cast<std::size_t>(i)][0] = npatches + 1;
-      dp.patches_index[static_cast<std::size_t>(i)][1] = npatches + pr.npatches;
-      npatches += pr.npatches;
+      out.pr = patchesconstruct(i, C, R, ds.segment, ds.ncrasegment, I,
+                                circle, circleindex_i, ncircleindex(i),
+                                out.loops_i, out.nloops_i, Rp);
+      out.has_patches = true;
 
       // TODO(want_area): the per-patch Gauss-Bonnet SAS area (mod_seg_loop_cir +
       // area_spherical -> data_av) is omitted in the mesh path.
+    }
+  });
+
+  // ---- SERIAL merge (ascending i): exact old accumulation order -----------
+  for (int i = 1; i <= M; ++i) {
+    AtomLP& a = per_atom[static_cast<std::size_t>(i)];
+    if (a.has_loops) {
+      // accumulate into global loops; loops_index[i] = [start, end].
+      for (int k = 1; k <= a.nloops_i; ++k) {
+        dl.loops.push_back(std::move(a.loops_i[static_cast<std::size_t>(k)]));
+      }
+      dl.loops_index[static_cast<std::size_t>(i)][0] = nloops + 1;
+      dl.loops_index[static_cast<std::size_t>(i)][1] = nloops + a.nloops_i;
+      nloops += a.nloops_i;
+    }
+    if (a.has_patches) {
+      for (int k = 1; k <= a.pr.npatches; ++k) {
+        dp.patches.push_back(std::move(a.pr.patches[static_cast<std::size_t>(k)]));
+        dp.patch_atom.push_back(i);
+      }
+      dp.patches_index[static_cast<std::size_t>(i)][0] = npatches + 1;
+      dp.patches_index[static_cast<std::size_t>(i)][1] = npatches + a.pr.npatches;
+      npatches += a.pr.npatches;
     }
   }
 
