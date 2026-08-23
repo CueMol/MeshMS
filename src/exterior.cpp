@@ -5,8 +5,8 @@
 // never called by data_ext) and is intentionally NOT ported.
 #include "meshms/exterior.hpp"
 
+#include <array>
 #include <stdexcept>
-#include <unordered_map>
 
 namespace meshms {
 
@@ -66,7 +66,12 @@ Ext data_ext(const Geom& geom, const Neighbors& /*nb*/, const DataI& data_i,
   // neighbor[j] records all neighbour patches to the j-th spherical patch.
   // Size the width to the true maximum per-patch boundary element count
   // (sum of loop sizes + number of circles) --- matches the exterior module.
-  int max_boundary = 1;
+  // Exact per-patch boundary element count (sum of loop sizes + #circles); the
+  // counts drive a CSR layout below instead of the old dense
+  // npatches x max_boundary rectangle (npatches allocations of the global
+  // maximum width). Pure integer bookkeeping: the appended values and their
+  // per-patch order are unchanged.
+  std::vector<int64_t> pcnt(static_cast<std::size_t>(npatches) + 1, 0);
   for (int i = 1; i <= M; ++i) {
     if (patches_index[static_cast<std::size_t>(i)][0] > 0) {
       for (int j = patches_index[static_cast<std::size_t>(i)][0];
@@ -85,21 +90,40 @@ Ext data_ext(const Geom& geom, const Neighbors& /*nb*/, const DataI& data_i,
             cnt += 1;
           }
         }
-        if (cnt > max_boundary) max_boundary = cnt;
+        pcnt[static_cast<std::size_t>(j)] = cnt;
       }
     }
   }
-  // neighbor[j] is a 1-based row (neighbor[j][0] dummy, slots 1..Nneighbor[j]).
-  std::vector<std::vector<int32_t>> neighbor(
-      static_cast<std::size_t>(npatches) + 1,
-      std::vector<int32_t>(static_cast<std::size_t>(max_boundary) + 1, 0));
+  // CSR: patch j's neighbour slots live at nval[noff[j] .. noff[j]+Nneighbor[j]-1].
+  std::vector<int64_t> noff(static_cast<std::size_t>(npatches) + 2, 0);
+  for (int j = 1; j <= npatches; ++j) {
+    noff[static_cast<std::size_t>(j) + 1] =
+        noff[static_cast<std::size_t>(j)] + pcnt[static_cast<std::size_t>(j)];
+  }
+  std::vector<int32_t> nval(static_cast<std::size_t>(noff[static_cast<std::size_t>(npatches) + 1]), 0);
   std::vector<int64_t> Nneighbor(static_cast<std::size_t>(npatches) + 1, 0);
 
   // Reverse index: per (id, atom) -> the single patch on that atom owning the
-  // given segment/circle id. seg_owner keyed by segment id (>0); cir_owner keyed
-  // by positive circle id. Accumulated in the SAME loop order as Python.
-  std::unordered_map<int, std::unordered_map<int, int>> seg_owner;  // id -> {atom: patch}
-  std::unordered_map<int, std::unordered_map<int, int>> cir_owner;  // cid -> {atom: patch}
+  // given segment/circle id. A segment lies on exactly the two atoms seg[sn][0]
+  // and seg[sn][1], a circle on circle[cid][1] and circle[cid][2], so the old
+  // map-of-maps (one heap hash map per id, <=2 entries each) flattens to one
+  // 2-slot row per id. _owner only ever queries those two atoms, so a write by
+  // any other atom (never queried, dead in the map too) is dropped. Same
+  // last-writer-wins overwrite semantics, zero hashing.
+  std::vector<std::array<int32_t, 2>> seg_owner(
+      static_cast<std::size_t>(nsegment) + 1, std::array<int32_t, 2>{0, 0});
+  std::vector<std::array<int32_t, 2>> cir_owner(
+      static_cast<std::size_t>(ncircle) + 1, std::array<int32_t, 2>{0, 0});
+  auto seg_slot = [&](int sn, int atom) -> int {
+    if (atom == seg[static_cast<std::size_t>(sn)][0]) return 0;
+    if (atom == seg[static_cast<std::size_t>(sn)][1]) return 1;
+    return -1;
+  };
+  auto cir_slot = [&](int cid, int atom) -> int {
+    if (atom == static_cast<int>(circle[static_cast<std::size_t>(cid)][1])) return 0;
+    if (atom == static_cast<int>(circle[static_cast<std::size_t>(cid)][2])) return 1;
+    return -1;
+  };
   for (int i = 1; i <= M; ++i) {
     if (patches_index[static_cast<std::size_t>(i)][0] > 0) {
       for (int j = patches_index[static_cast<std::size_t>(i)][0];
@@ -114,10 +138,13 @@ Ext data_ext(const Geom& geom, const Neighbors& /*nb*/, const DataI& data_i,
               const int sn =
                   loops[static_cast<std::size_t>(ln)][static_cast<std::size_t>(
                       s0)];
-              seg_owner[sn][i] = j;
+              const int sl = seg_slot(sn, i);
+              if (sl >= 0) seg_owner[static_cast<std::size_t>(sn)][static_cast<std::size_t>(sl)] = j;
             }
           } else {
-            cir_owner[cidx(i, -pjk)][i] = j;
+            const int cid = cidx(i, -pjk);
+            const int sl = cir_slot(cid, i);
+            if (sl >= 0) cir_owner[static_cast<std::size_t>(cid)][static_cast<std::size_t>(sl)] = j;
           }
         }
       }
@@ -136,13 +163,13 @@ Ext data_ext(const Geom& geom, const Neighbors& /*nb*/, const DataI& data_i,
     } else {
       throw std::runtime_error("error");
     }
-    const std::unordered_map<int, std::unordered_map<int, int>>& owners_map =
-        (n > 0) ? seg_owner : cir_owner;
     const int key = (n > 0) ? n : -n;
-    auto it = owners_map.find(key);
-    if (it != owners_map.end()) {
-      auto jt = it->second.find(i0);
-      if (jt != it->second.end()) return jt->second;
+    const int sl = (n > 0) ? seg_slot(key, i0) : cir_slot(key, i0);
+    if (sl >= 0) {
+      const int32_t owner = (n > 0)
+          ? seg_owner[static_cast<std::size_t>(key)][static_cast<std::size_t>(sl)]
+          : cir_owner[static_cast<std::size_t>(key)][static_cast<std::size_t>(sl)];
+      if (owner != 0) return owner;  // 0 == never written (map-miss fallback)
     }
     return patches_index[static_cast<std::size_t>(i0)][1];
   };
@@ -167,9 +194,10 @@ Ext data_ext(const Geom& geom, const Neighbors& /*nb*/, const DataI& data_i,
               const int j0 =
                   _owner(sn, seg[static_cast<std::size_t>(sn)][0],
                          seg[static_cast<std::size_t>(sn)][1], i);
-              Nneighbor[static_cast<std::size_t>(j)] += 1;
-              neighbor[static_cast<std::size_t>(j)][static_cast<std::size_t>(
+              nval[static_cast<std::size_t>(
+                  noff[static_cast<std::size_t>(j)] +
                   Nneighbor[static_cast<std::size_t>(j)])] = j0;
+              Nneighbor[static_cast<std::size_t>(j)] += 1;
             }
           } else {
             // patches(j,k)<0 -> index of circle on the i-th sphere
@@ -180,9 +208,10 @@ Ext data_ext(const Geom& geom, const Neighbors& /*nb*/, const DataI& data_i,
             const int sp1 = static_cast<int>(
                 circle[static_cast<std::size_t>(-cn)][2]);
             const int j0 = _owner(cn, sp0, sp1, i);
-            Nneighbor[static_cast<std::size_t>(j)] += 1;
-            neighbor[static_cast<std::size_t>(j)][static_cast<std::size_t>(
+            nval[static_cast<std::size_t>(
+                noff[static_cast<std::size_t>(j)] +
                 Nneighbor[static_cast<std::size_t>(j)])] = j0;
+            Nneighbor[static_cast<std::size_t>(j)] += 1;
           }
         }
       }
@@ -312,8 +341,8 @@ Ext data_ext(const Geom& geom, const Neighbors& /*nb*/, const DataI& data_i,
     if (i <= nset) {
       const int j = ext_patchset[static_cast<std::size_t>(i)];
       for (int k = 1; k <= Nneighbor[static_cast<std::size_t>(j)]; ++k) {
-        const int n =
-            neighbor[static_cast<std::size_t>(j)][static_cast<std::size_t>(k)];
+        const int n = nval[static_cast<std::size_t>(
+            noff[static_cast<std::size_t>(j)] + k - 1)];
         if (ext_patch[static_cast<std::size_t>(n)] == 0) {
           nset += 1;
           ext_patchset[static_cast<std::size_t>(nset)] = n;

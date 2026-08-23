@@ -70,6 +70,17 @@ std::pair<DataI, DataCir> data_I_Cir(const Geom& geom, const Neighbors& nb, doub
   auto Row = [&](int i) { return nb.count(i); };
   auto Mint = [&](int i, int row) { return nb.of(i)[static_cast<std::size_t>(row - 1)]; };
 
+  // Memoized extended radii: Rext[a] = R[a] + Rp and Rext2[a] = pysq(R[a] + Rp).
+  // pysq is a real libm pow() call and these two expressions were re-evaluated in
+  // the O(Ri^2) inner loops below; substituting the precomputed value is a pure
+  // memoization of a deterministic function of `a` -- identical bits.
+  std::vector<double> Rext(static_cast<std::size_t>(M) + 1, 0.0);
+  std::vector<double> Rext2(static_cast<std::size_t>(M) + 1, 0.0);
+  for (int a = 1; a <= M; ++a) {
+    Rext[static_cast<std::size_t>(a)] = R[static_cast<std::size_t>(a)] + Rp;
+    Rext2[static_cast<std::size_t>(a)] = pysq(R[static_cast<std::size_t>(a)] + Rp);
+  }
+
   DataI di;
   DataCir dc;
 
@@ -92,15 +103,23 @@ std::pair<DataI, DataCir> data_I_Cir(const Geom& geom, const Neighbors& nb, doub
   meshms::parallel_for(1, M + 1, [&](int i) {
     AtomEvents& evi = ev[static_cast<std::size_t>(i)];
     const int Ri = Row(i);
+    // Per-row scratch reused across j: q[row] = sqrt(1-ctheta^2)*dist_a and
+    // p[row] = pysq(ctheta*dist_a) computed by the coverage pre-loop below. The
+    // row2 loop runs only when the pre-loop COMPLETED (circletest still 1), so
+    // every k != j slot it reads is filled for the current j. Capacity hints /
+    // memoization only -- no float expression or order changes.
+    std::vector<double> q_scratch(static_cast<std::size_t>(Ri) + 1, 0.0);
+    std::vector<double> p_scratch(static_cast<std::size_t>(Ri) + 1, 0.0);
     for (int row1 = 1; row1 <= Ri; ++row1) {
       const int j = Mint(i, row1);
       if (j <= i) continue;
 
       int circletest = 1;
-      Vec3 A = circlecenter(C[i], C[j], R[i] + Rp, R[j] + Rp);
+      Vec3 A = circlecenter(C[i], C[j], Rext[static_cast<std::size_t>(i)],
+                            Rext[static_cast<std::size_t>(j)]);
       // discriminant of the intersection-circle radius; <= 0 means one SAS ball
       // contains the other (or tangent) -> no real circle.
-      const double disc = pysq(R[i] + Rp) - pysq(norm(C[i] - A));
+      const double disc = Rext2[static_cast<std::size_t>(i)] - pysq(norm(C[i] - A));
       if (disc <= 0) continue;
 
       Vec3 normal = C[j] - C[i];
@@ -115,9 +134,11 @@ std::pair<DataI, DataCir> data_I_Cir(const Geom& geom, const Neighbors& nb, doub
           Vec3 a = A - C[k];
           const double dist_a = norm(a);
           const double ctheta = dot(a, normal) / (dist_a * dist_normal);
-          if (pysq(std::sqrt(1 - pysq(ctheta)) * dist_a + rij) +
-                  pysq(ctheta * dist_a) - pysq(R[k] + Rp) <
-              0) {
+          const double q = std::sqrt(1 - pysq(ctheta)) * dist_a;
+          const double pp = pysq(ctheta * dist_a);
+          q_scratch[static_cast<std::size_t>(row)] = q;
+          p_scratch[static_cast<std::size_t>(row)] = pp;
+          if (pysq(q + rij) + pp - Rext2[static_cast<std::size_t>(k)] < 0) {
             circletest = 0;
             break;
           }
@@ -129,11 +150,11 @@ std::pair<DataI, DataCir> data_I_Cir(const Geom& geom, const Neighbors& nb, doub
           const int k = Mint(i, row2);
 
           if (k < j && circletest == 1) {  // test if circle is a whole circle
-            Vec3 a = A - C[k];
-            const double dist_a = norm(a);
-            const double ctheta = dot(a, normal) / (dist_a * dist_normal);
-            if (pysq(-std::sqrt(1 - pysq(ctheta)) * dist_a + rij) +
-                    pysq(ctheta * dist_a) - pysq(R[k] + Rp) <
+            // Reuse the pre-loop's q/p for this row: -sqrt(...)*dist_a == -q
+            // exactly (IEEE multiply sign symmetry), pysq(ctheta*dist_a) == p.
+            if (pysq(-q_scratch[static_cast<std::size_t>(row2)] + rij) +
+                    p_scratch[static_cast<std::size_t>(row2)] -
+                    Rext2[static_cast<std::size_t>(k)] <
                 0) {
               circletest = 0;
             }
@@ -153,7 +174,8 @@ std::pair<DataI, DataCir> data_I_Cir(const Geom& geom, const Neighbors& nb, doub
             }
           }
           if (row3) {
-            Vec3 B = circlecenter(C[k], C[j], R[k] + Rp, R[j] + Rp);
+            Vec3 B = circlecenter(C[k], C[j], Rext[static_cast<std::size_t>(k)],
+                                  Rext[static_cast<std::size_t>(j)]);
             Vec3 cij = C[i] - C[j];
             Vec3 ckj = C[k] - C[j];
             Vec3 cr = cross(cij, ckj);
@@ -162,7 +184,7 @@ std::pair<DataI, DataCir> data_I_Cir(const Geom& geom, const Neighbors& nb, doub
             Vec3 u = ckj - dot(ckj, cij) * cij / dot(cij, cij);
             const double t = dot(B - A, ckj) / dot(u, ckj);
             Vec3 X1 = A + t * u;
-            const double c = -(pysq(norm(X1 - C[i]))) + pysq(R[i] + Rp);
+            const double c = -(pysq(norm(X1 - C[i]))) + Rext2[static_cast<std::size_t>(i)];
 
             if (c > 0) {
               circletest = 0;
@@ -175,11 +197,15 @@ std::pair<DataI, DataCir> data_I_Cir(const Geom& geom, const Neighbors& nb, doub
               int true_hight = 1;
               if (s2 < Rp) true_hight = 0;
 
+              // Integer guard first: the norm for ll == j / ll == k was computed
+              // and discarded (its value never observable), so skipping it changes
+              // nothing.
               int true1 = 1;
               for (int row = 1; row <= Ri; ++row) {
                 const int ll = Mint(i, row);
+                if (ll == j || ll == k) continue;
                 const double dist1 = norm(C[ll] - Y1);
-                if (dist1 < R[ll] + Rp && ll != j && ll != k) {
+                if (dist1 < Rext[static_cast<std::size_t>(ll)]) {
                   true1 = 0;
                   break;
                 }
@@ -187,8 +213,9 @@ std::pair<DataI, DataCir> data_I_Cir(const Geom& geom, const Neighbors& nb, doub
               int true2 = 1;
               for (int row = 1; row <= Ri; ++row) {
                 const int ll = Mint(i, row);
+                if (ll == j || ll == k) continue;
                 const double dist2 = norm(C[ll] - Y2);
-                if (dist2 < R[ll] + Rp && ll != j && ll != k) {
+                if (dist2 < Rext[static_cast<std::size_t>(ll)]) {
                   true2 = 0;
                   break;
                 }
