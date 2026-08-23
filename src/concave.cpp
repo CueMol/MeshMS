@@ -579,16 +579,13 @@ void fill_vatom_nearest3(LocalMesh& lm, int32_t ai, int32_t aj, int32_t ak,
 // ----- construct_concavepat -------------------------------------------------
 // Emits its meshed patches (in order) into `out` instead of state.add_patch, so
 // the per-probe loop can run in parallel into per-iteration LocalMesh lists.
-void construct_concavepat(std::vector<LocalMesh>& out, ConcaveState& cs, int k1,
+void decomp_construct_concavepat(ProbePatchSet& pd, double Rp, int k1,
                           const std::vector<Vec3>& I,
                           const std::vector<Vec3>& I_probe, int N_probe,
                           const std::vector<std::array<double, 11>>& segment,
                           int N_segment,
                           const std::vector<std::array<double, 8>>& circle_interior,
                           int N_circle, int direct) {
-  double Rp = cs.Rp;
-  double d = cs.d;
-
   // --- group identical I_probe points (map_same) ---
   std::vector<int> map_same(static_cast<std::size_t>(N_probe) + 1, 0);
   std::vector<int> samepoint_rep(static_cast<std::size_t>(N_probe) + 1, 0);
@@ -667,23 +664,39 @@ void construct_concavepat(std::vector<LocalMesh>& out, ConcaveState& cs, int k1,
     }
   }
 
-  // --- mesh each patch (cSAS full-trim pass meshes; eSAS pass area-only) ---
-  for (int i = 1; i <= po.npatches; ++i) {
-    if (cs.arg_eSAS == 1) {
-      // eSAS pass: area/volume only -- skipped (av==None, no mesh).
-    } else {
-      Tag btag{2, k1, 0};  // ("probe", k1)
-      out.push_back(mesh_sphpat(
-          I[static_cast<std::size_t>(k1)], Rp, lo.loops, segment0, circle0,
-          po.patches[static_cast<std::size_t>(i)],
-          po.patchesize[static_cast<std::size_t>(i)], Rp, d, nullptr, btag));
-    }
+  // --- store the decomposition; meshing happens in mesh_probe_patchset -----
+  pd.k1 = k1;
+  pd.loops = std::move(lo.loops);
+  pd.segment0 = std::move(segment0);
+  pd.circle0 = std::move(circle0);
+  pd.patches = std::move(po.patches);
+  pd.patchesize = std::move(po.patchesize);
+  pd.npatches = po.npatches;
+}
+
+// Mesh every patch of one probe's decomposition (the cSAS full-trim pass; the
+// eSAS pass is area-only and never meshes). Bit-identical inputs and call order
+// to the old construct_concavepat mesh loop + the fill_vatom_nearest3 pass.
+void mesh_probe_patchset(std::vector<LocalMesh>& out, const ProbePatchSet& pd,
+                         const std::vector<Vec3>& I, double Rp, double d) {
+  const std::size_t vstart = out.size();
+  for (int i = 1; i <= pd.npatches; ++i) {
+    Tag btag{2, pd.k1, 0};  // ("probe", k1)
+    out.push_back(mesh_sphpat(
+        I[static_cast<std::size_t>(pd.k1)], Rp, pd.loops, pd.segment0, pd.circle0,
+        pd.patches[static_cast<std::size_t>(i)],
+        pd.patchesize[static_cast<std::size_t>(i)], Rp, d, nullptr, btag));
+  }
+  // Attribute the just-meshed concave patches to the nearest of {a_i,a_j,a_k}.
+  for (std::size_t t = vstart; t < out.size(); ++t) {
+    fill_vatom_nearest3(out[t], pd.a_i, pd.a_j, pd.a_k, pd.ci, pd.cj, pd.ck);
   }
 }
 
 // ----- data_concavepat ------------------------------------------------------
-// Emits its patches (in order) into `out`; all scratch is call-local (thread-safe).
-void data_concavepat(std::vector<LocalMesh>& out, ConcaveState& cs, int i,
+// Computes probe i's DENSITY-INDEPENDENT decomposition into `pd`; all scratch is
+// call-local (thread-safe). Meshing happens separately (mesh_probe_patchset).
+void data_concavepat(ProbePatchSet& pd, int i,
                      const std::vector<int>& hight_set,
                      const std::vector<int>& K_in, int Kn_in,
                      const std::vector<Vec3>& I,
@@ -1151,15 +1164,15 @@ void data_concavepat(std::vector<LocalMesh>& out, ConcaveState& cs, int i,
   }
   segment.resize(static_cast<std::size_t>(N_segment) + 1);
 
-  // --- construct concave patches and mesh ---
-  const std::size_t vstart = out.size();
-  construct_concavepat(out, cs, i0, I, I_probe, N_probe, segment, N_segment,
-                       circle_interior, N_circle, dir_i0);
-  // Attribute the just-meshed concave patches to the nearest of {a_i,a_j,a_k}.
-  for (std::size_t t = vstart; t < out.size(); ++t) {
-    fill_vatom_nearest3(out[t], static_cast<int32_t>(a_i), static_cast<int32_t>(a_j),
-                        static_cast<int32_t>(a_k), ci, cj, ck);
-  }
+  // --- construct the concave-patch decomposition (no meshing here) ---
+  decomp_construct_concavepat(pd, probe, i0, I, I_probe, N_probe, segment,
+                              N_segment, circle_interior, N_circle, dir_i0);
+  pd.a_i = static_cast<int32_t>(a_i);
+  pd.a_j = static_cast<int32_t>(a_j);
+  pd.a_k = static_cast<int32_t>(a_k);
+  pd.ci = ci;
+  pd.cj = cj;
+  pd.ck = ck;
 }
 
 // ----- build_neighbors ------------------------------------------------------
@@ -1210,25 +1223,17 @@ NeighborsOut build_neighbors(int nhight, const std::vector<int>& hight_set,
 
 }  // namespace
 
-// ----- SESconcavepat (driver) -----------------------------------------------
-void SESconcavepat(MeshState& state, const Geom& geom, const DataI& di,
-                   const Ext& ext, double Rp, double d, const Neighbors& inter) {
+// ----- precompute_concave (density-independent half) -------------------------
+ConcaveDecomp precompute_concave(const Geom& geom, const DataI& di, double Rp,
+                                 const Neighbors& inter) {
   int s = di.nI;
   const std::vector<Vec3>& I = di.I;
   const std::vector<std::array<int32_t, 3>>& Iijk = di.Iijk;
   const std::vector<Vec3>& C = geom.centers;
-  const std::vector<double>& R = geom.R;
   const std::vector<int32_t>& hight = di.high_I;
   const std::vector<std::array<int32_t, 3>>& direction = di.direction;
-  (void)ext;  // ext_I (eSAS flags) is read only in the deferred av-only passes.
-
-  ConcaveState cs(Rp, d);
-
-  // Volume of cSAS/eSAS and the eSAS interior-trim pass are av-only -> skipped.
 
   // ======================== cSAS case (arg_eSAS=0) ======================== //
-  cs.arg_eSAS = 0;
-
   std::vector<int> hight_set(static_cast<std::size_t>(s) + 1, 0);
   int nhight = 0;
   std::vector<int> inverse_hight(static_cast<std::size_t>(s) + 1, 0);
@@ -1244,20 +1249,43 @@ void SESconcavepat(MeshState& state, const Geom& geom, const DataI& di,
   NeighborsOut nbo = build_neighbors(nhight, hight_set, inverse_hight, I, Iijk, di,
                                      inter, Rp);
 
-  // PARALLEL S7 (cSAS pass): _build_neighbors above is SERIAL and read-only
-  // afterwards. Each probe i meshes independently (data_concavepat scratch is
-  // all call-local) and may emit MULTIPLE patches -> a per-iteration
-  // vector<LocalMesh>. `cs` is read-only here (arg_eSAS already 0). A SERIAL
-  // ordered merge then add_patch every patch in probe-then-patch order.
-  std::vector<std::vector<LocalMesh>> probe_lm(static_cast<std::size_t>(nhight) + 1);
+  // PARALLEL: each probe's decomposition is independent (call-local scratch)
+  // and lands in its own fixed slot -- no merge step, order-independent.
+  ConcaveDecomp dec;
+  dec.nhight = nhight;
+  dec.probes.assign(static_cast<std::size_t>(nhight) + 1, ProbePatchSet{});
   meshms::parallel_for(1, nhight + 1, [&](int i) {
     int Kn = nbo.N_neighbor[static_cast<std::size_t>(i)];
     std::vector<int> K_in(static_cast<std::size_t>(Kn) + 1, 0);
     for (int t = 1; t <= Kn; ++t) {
       K_in[static_cast<std::size_t>(t)] = nbo.neighbor_I[static_cast<std::size_t>(i)][static_cast<std::size_t>(t - 1)];
     }
-    data_concavepat(probe_lm[static_cast<std::size_t>(i)], cs, i, hight_set, K_in,
+    data_concavepat(dec.probes[static_cast<std::size_t>(i)], i, hight_set, K_in,
                     Kn, I, Iijk, C, Rp, direction);
+  });
+  return dec;
+}
+
+// ----- SESconcavepat_mesh (density-dependent half) ---------------------------
+void SESconcavepat_mesh(MeshState& state, const Geom& geom, const DataI& di,
+                        const ConcaveDecomp& decomp, double Rp, double d) {
+  int s = di.nI;
+  const std::vector<Vec3>& I = di.I;
+  const std::vector<std::array<int32_t, 3>>& Iijk = di.Iijk;
+  const std::vector<Vec3>& C = geom.centers;
+  const std::vector<double>& R = geom.R;
+  const std::vector<int32_t>& hight = di.high_I;
+  const std::vector<std::array<int32_t, 3>>& direction = di.direction;
+
+  const int nhight = decomp.nhight;
+
+  // PARALLEL S7 (cSAS pass): each probe meshes its precomputed patch set
+  // independently -> a per-iteration vector<LocalMesh>, then a SERIAL ordered
+  // merge add_patch's every patch in probe-then-patch order.
+  std::vector<std::vector<LocalMesh>> probe_lm(static_cast<std::size_t>(nhight) + 1);
+  meshms::parallel_for(1, nhight + 1, [&](int i) {
+    mesh_probe_patchset(probe_lm[static_cast<std::size_t>(i)],
+                        decomp.probes[static_cast<std::size_t>(i)], I, Rp, d);
   });
   {
     std::size_t add_v = 0, add_f = 0;
@@ -1278,7 +1306,6 @@ void SESconcavepat(MeshState& state, const Geom& geom, const DataI& di,
   }
 
   // ===================== simple concave triangles ======================== //
-  cs.arg_eSAS = 1;
 
   // PARALLEL S7 (simple-triangle pass): each i with hight[i]==1 emits exactly
   // ONE LocalMesh; all scratch (loops/segment0/...) is call-local. A fixed
@@ -1382,6 +1409,15 @@ void SESconcavepat(MeshState& state, const Geom& geom, const DataI& di,
     LocalMesh& lm = tri_lm[static_cast<std::size_t>(i)];
     if (lm.emit) state.add_patch(lm.P, lm.T, lm.NV, std::move(lm.vids), lm.vatom);
   }
+}
+
+// ----- SESconcavepat (driver) -----------------------------------------------
+void SESconcavepat(MeshState& state, const Geom& geom, const DataI& di,
+                   const Ext& ext, double Rp, double d, const Neighbors& inter) {
+  (void)ext;  // ext_I (eSAS flags) is read only in the deferred av-only passes.
+  // Volume of cSAS/eSAS and the eSAS interior-trim pass are av-only -> skipped.
+  ConcaveDecomp dec = precompute_concave(geom, di, Rp, inter);
+  SESconcavepat_mesh(state, geom, di, dec, Rp, d);
 }
 
 }  // namespace meshms

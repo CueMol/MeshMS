@@ -97,6 +97,10 @@ RSComponents compute_rs(const Geom& geom, double radius_probe) {
   rs.ds = std::move(ds);
   rs.dl = std::move(dl);
   rs.dp = std::move(dp);
+  // Density-independent concave decomposition (was recomputed inside every
+  // SESconcavepat call): pure memoization -- same function, same inputs,
+  // computed once. build_mesh() then only re-meshes it per density.
+  rs.concave = precompute_concave(rs.geom, rs.di, Rp, rs.inter);
   return rs;
 }
 
@@ -112,7 +116,7 @@ Surface build_mesh(const RSComponents& rs, double mesh_size, bool fuse) {
   MeshState state;
   data_SESsphpat_convex(state, geom, rs.di, rs.dc, rs.ds, rs.dl, rs.dp, &rs.ext, Rp, d);
   const std::size_t n_convex = state.F.size();
-  SESconcavepat(state, geom, rs.di, rs.ext, Rp, d, rs.inter);
+  SESconcavepat_mesh(state, geom, rs.di, rs.concave, Rp, d);
   const std::size_t n_concave = state.F.size();
   data_SEStorpat(state, geom, rs.di, rs.ds, rs.dc, &rs.ext, Rp, d);
   const std::size_t n_total = state.F.size();
