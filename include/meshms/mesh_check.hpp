@@ -3,6 +3,8 @@
 // Edge-incidence statistics, watertightness, degenerate/duplicate faces, total
 // surface area and signed volume. Used to gate SES mesh quality (the §5
 // equivalence gate). Indexing here is the 0-based PLY/mesh convention.
+#include <array>
+#include <cstdint>
 #include <vector>
 
 #include "meshms/mesh.hpp"
@@ -35,5 +37,11 @@ struct ManifoldReport {
 //   degenerate_faces   = repeated-index OR |cross| < 1e-12,
 //   duplicate_faces    = #sorted-triples seen more than once.
 ManifoldReport manifold_report(const std::vector<Vec3>& V, const std::vector<Tri>& F);
+
+// Facade-layout overload: identical math over the capi MeshResult arrays
+// (x,y,z triples and 0-based uint32 index triples) without converting the whole
+// mesh to Vec3/Tri first. Bit-identical results.
+ManifoldReport manifold_report(const std::vector<std::array<double, 3>>& V,
+                               const std::vector<std::array<std::uint32_t, 3>>& F);
 
 }  // namespace meshms

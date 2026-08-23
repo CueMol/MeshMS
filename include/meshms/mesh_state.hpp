@@ -94,6 +94,43 @@ struct MeshState {
     }
   }
 
+  // add_patch overload that MOVES each per-vertex TagList out of `vids` instead
+  // of copying it (every tagged boundary vertex otherwise costs one heap copy in
+  // the serial merge). Results are identical; `vids` entries are left moved-from,
+  // which is fine because the drivers discard the LocalMesh right after merging.
+  void add_patch(const std::vector<Vec3>& P,
+                 const std::vector<std::array<int, 3>>& T,
+                 const std::vector<Vec3>& face_normals,
+                 std::vector<TagList>&& vids,
+                 const std::vector<int32_t>& patch_vatom = {}) {
+    const std::size_t base = V.size();
+    const std::size_t Np = P.empty() ? 0 : P.size() - 1;
+    for (std::size_t k = 1; k <= Np; ++k) {
+      V.push_back(P[k]);
+      tags.push_back(vids.empty() ? TagList{} : std::move(vids[k - 1]));
+      vatom.push_back(patch_vatom.empty() ? 0 : patch_vatom[k - 1]);
+    }
+    const bool have_nrm = !face_normals.empty();
+    for (std::size_t idx = 0; idx < T.size(); ++idx) {
+      const auto& t = T[idx];
+      F.push_back(Tri{static_cast<int32_t>(t[0] - 1 + static_cast<int>(base)),
+                      static_cast<int32_t>(t[1] - 1 + static_cast<int>(base)),
+                      static_cast<int32_t>(t[2] - 1 + static_cast<int>(base))});
+      if (have_nrm) N.push_back(face_normals[idx]);
+    }
+  }
+
+  // Reserve capacity for `nv` more vertices and `nf` more faces ahead of an
+  // ordered merge whose totals are already known (the parallel phase filled every
+  // LocalMesh). Capacity-only: contents and order never change.
+  void reserve_extra(std::size_t nv, std::size_t nf) {
+    V.reserve(V.size() + nv);
+    tags.reserve(tags.size() + nv);
+    vatom.reserve(vatom.size() + nv);
+    F.reserve(F.size() + nf);
+    N.reserve(N.size() + nf);
+  }
+
   std::size_t nverts() const { return V.size(); }
   std::size_t ntris() const { return F.size(); }
 };

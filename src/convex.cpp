@@ -276,9 +276,21 @@ void data_SESsphpat_convex(MeshState& state, const Geom& geom, const DataI& di,
   });
 
   // --- SERIAL ordered merge (atom ascending, then patch ascending) -------
+  // Pre-sum the emitted sizes so the accumulator reserves once (capacity-only),
+  // and move the per-vertex tag lists out of the dead LocalMesh.
+  std::size_t add_v = 0, add_f = 0;
   for (int i = 1; i <= M; ++i) {
     for (const LocalMesh& lm : atom_lm[static_cast<std::size_t>(i)]) {
-      if (lm.emit) state.add_patch(lm.P, lm.T, lm.NV, lm.vids, lm.vatom);
+      if (lm.emit) {
+        add_v += lm.P.empty() ? 0 : lm.P.size() - 1;
+        add_f += lm.T.size();
+      }
+    }
+  }
+  state.reserve_extra(add_v, add_f);
+  for (int i = 1; i <= M; ++i) {
+    for (LocalMesh& lm : atom_lm[static_cast<std::size_t>(i)]) {
+      if (lm.emit) state.add_patch(lm.P, lm.T, lm.NV, std::move(lm.vids), lm.vatom);
     }
   }
 }

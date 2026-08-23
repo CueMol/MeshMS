@@ -1256,9 +1256,21 @@ void SESconcavepat(MeshState& state, const Geom& geom, const DataI& di,
     data_concavepat(probe_lm[static_cast<std::size_t>(i)], cs, i, hight_set, K_in,
                     Kn, I, Iijk, C, Rp, direction);
   });
+  {
+    std::size_t add_v = 0, add_f = 0;
+    for (int i = 1; i <= nhight; ++i) {
+      for (const LocalMesh& lm : probe_lm[static_cast<std::size_t>(i)]) {
+        if (lm.emit) {
+          add_v += lm.P.empty() ? 0 : lm.P.size() - 1;
+          add_f += lm.T.size();
+        }
+      }
+    }
+    state.reserve_extra(add_v, add_f);
+  }
   for (int i = 1; i <= nhight; ++i) {
-    for (const LocalMesh& lm : probe_lm[static_cast<std::size_t>(i)]) {
-      if (lm.emit) state.add_patch(lm.P, lm.T, lm.NV, lm.vids, lm.vatom);
+    for (LocalMesh& lm : probe_lm[static_cast<std::size_t>(i)]) {
+      if (lm.emit) state.add_patch(lm.P, lm.T, lm.NV, std::move(lm.vids), lm.vatom);
     }
   }
 
@@ -1352,9 +1364,20 @@ void SESconcavepat(MeshState& state, const Geom& geom, const DataI& di,
                           static_cast<int32_t>(a_k), ci, cj, ck);
     }
   });
+  {
+    std::size_t add_v = 0, add_f = 0;
+    for (int i = 1; i <= s; ++i) {
+      const LocalMesh& lm = tri_lm[static_cast<std::size_t>(i)];
+      if (lm.emit) {
+        add_v += lm.P.empty() ? 0 : lm.P.size() - 1;
+        add_f += lm.T.size();
+      }
+    }
+    state.reserve_extra(add_v, add_f);
+  }
   for (int i = 1; i <= s; ++i) {
-    const LocalMesh& lm = tri_lm[static_cast<std::size_t>(i)];
-    if (lm.emit) state.add_patch(lm.P, lm.T, lm.NV, lm.vids, lm.vatom);
+    LocalMesh& lm = tri_lm[static_cast<std::size_t>(i)];
+    if (lm.emit) state.add_patch(lm.P, lm.T, lm.NV, std::move(lm.vids), lm.vatom);
   }
 }
 

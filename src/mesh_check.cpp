@@ -5,31 +5,58 @@
 // relative on the golden meshes -- far inside the equivalence gate (counts exact;
 // area/volume within ~1e-6 relative). The C++ port is gated on
 // equivalence, NOT byte-identity, so this reduction-order difference is expected.
+//
+// The core is templated over the vertex/face container element types so the
+// facade-layout overloads (std::array<double,3> / std::array<uint32_t,3>, the
+// meshms::capi MeshResult arrays) run the IDENTICAL math without converting the
+// whole mesh to Vec3/Tri first. The array<double,3> -> Vec3 load is an
+// element-wise copy of the same three doubles, so results are bit-identical.
 #include "meshms/mesh_check.hpp"
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
-#include <map>
+#include <unordered_map>
+#include <utility>
 
 namespace meshms {
 
 namespace {
 
-// Vertex i of a triangle (Tri stores 0-based int32 indices).
-inline const Vec3& vert(const std::vector<Vec3>& V, int32_t i) {
-  return V[static_cast<std::size_t>(i)];
+// Element adapters: position of vertex i and 0-based index k of a face, for both
+// the internal (Vec3/Tri) and the facade (array<double,3>/array<uint32,3>) types.
+inline Vec3 vget(const std::vector<Vec3>& V, std::size_t i) { return V[i]; }
+inline Vec3 vget(const std::vector<std::array<double, 3>>& V, std::size_t i) {
+  return Vec3{V[i][0], V[i][1], V[i][2]};
+}
+inline int32_t iget(const Tri& f, int k) { return f[static_cast<std::size_t>(k)]; }
+inline int32_t iget(const std::array<std::uint32_t, 3>& f, int k) {
+  return static_cast<int32_t>(f[static_cast<std::size_t>(k)]);
 }
 
-}  // namespace
+// FNV-1a over the raw bytes of a sorted index triple (hash-map key hash only;
+// key equality is exact, so collisions cost time, never correctness).
+struct TriKeyHash {
+  std::size_t operator()(const std::array<int32_t, 3>& t) const {
+    std::uint64_t h = 1469598103934665603ULL;
+    const unsigned char* p = reinterpret_cast<const unsigned char*>(t.data());
+    for (std::size_t i = 0; i < sizeof(t); ++i) {
+      h ^= p[i];
+      h *= 1099511628211ULL;
+    }
+    return static_cast<std::size_t>(h);
+  }
+};
 
-double mesh_area(const std::vector<Vec3>& V, const std::vector<Tri>& F) {
+template <class VT, class FT>
+double mesh_area_impl(const std::vector<VT>& V, const std::vector<FT>& F) {
   if (F.empty()) return 0.0;
   double total = 0.0;
-  for (const Tri& f : F) {
-    const Vec3& a = vert(V, f[0]);
-    const Vec3& b = vert(V, f[1]);
-    const Vec3& c = vert(V, f[2]);
+  for (const FT& f : F) {
+    const Vec3 a = vget(V, static_cast<std::size_t>(iget(f, 0)));
+    const Vec3 b = vget(V, static_cast<std::size_t>(iget(f, 1)));
+    const Vec3 c = vget(V, static_cast<std::size_t>(iget(f, 2)));
     Vec3 cr = cross(b - a, c - a);
     // np.sqrt((cr*cr).sum(axis=1)) summed: per-triangle magnitude then 0.5*sum.
     total += norm(cr);
@@ -37,20 +64,23 @@ double mesh_area(const std::vector<Vec3>& V, const std::vector<Tri>& F) {
   return 0.5 * total;
 }
 
-double signed_volume(const std::vector<Vec3>& V, const std::vector<Tri>& F) {
+template <class VT, class FT>
+double signed_volume_impl(const std::vector<VT>& V, const std::vector<FT>& F) {
   if (F.empty()) return 0.0;
   double acc = 0.0;
-  for (const Tri& f : F) {
-    const Vec3& a = vert(V, f[0]);
-    const Vec3& b = vert(V, f[1]);
-    const Vec3& c = vert(V, f[2]);
+  for (const FT& f : F) {
+    const Vec3 a = vget(V, static_cast<std::size_t>(iget(f, 0)));
+    const Vec3 b = vget(V, static_cast<std::size_t>(iget(f, 1)));
+    const Vec3 c = vget(V, static_cast<std::size_t>(iget(f, 2)));
     // (a * np.cross(b, c)).sum() == a . (b x c) == triple(a, b, c).
     acc += triple(a, b, c);
   }
   return acc / 6.0;
 }
 
-ManifoldReport manifold_report(const std::vector<Vec3>& V, const std::vector<Tri>& F) {
+template <class VT, class FT>
+ManifoldReport manifold_report_impl(const std::vector<VT>& V,
+                                    const std::vector<FT>& F) {
   ManifoldReport rep{};
   const int nV = static_cast<int>(V.size());
   const int nF = static_cast<int>(F.size());
@@ -59,27 +89,36 @@ ManifoldReport manifold_report(const std::vector<Vec3>& V, const std::vector<Tri
 
   // Degenerate triangles: repeated vertex index OR |cross| < 1e-12.
   int degen = 0;
-  for (const Tri& f : F) {
-    bool repeated = (f[0] == f[1]) || (f[1] == f[2]) || (f[0] == f[2]);
-    const Vec3& a = vert(V, f[0]);
-    const Vec3& b = vert(V, f[1]);
-    const Vec3& c = vert(V, f[2]);
+  for (const FT& f : F) {
+    const int32_t i = iget(f, 0), j = iget(f, 1), k = iget(f, 2);
+    bool repeated = (i == j) || (j == k) || (i == k);
+    const Vec3 a = vget(V, static_cast<std::size_t>(i));
+    const Vec3 b = vget(V, static_cast<std::size_t>(j));
+    const Vec3 c = vget(V, static_cast<std::size_t>(k));
     Vec3 cr = cross(b - a, c - a);
     bool zero = norm(cr) < 1e-12;
     if (repeated || zero) ++degen;
   }
   rep.degenerate_faces = degen;
 
-  // Undirected edge incidence (key: sorted (u,v)) and sorted-triple face counts.
-  std::map<std::pair<int32_t, int32_t>, int> edge_count;
-  std::map<std::array<int32_t, 3>, int> face_seen;
-  for (const Tri& f : F) {
-    int32_t i = f[0], j = f[1], k = f[2];
+  // Undirected edge incidence (key: sorted (u,v) packed into a uint64) and
+  // sorted-triple face counts. Hash maps instead of ordered maps: the consumers
+  // below only COUNT entries by incidence, so iteration order is irrelevant and
+  // the O(log n) tree walks / per-node allocations are pure overhead.
+  std::unordered_map<std::uint64_t, int> edge_count;
+  std::unordered_map<std::array<int32_t, 3>, int, TriKeyHash> face_seen;
+  edge_count.reserve(F.size() * 3);
+  face_seen.reserve(F.size());
+  for (const FT& f : F) {
+    const int32_t i = iget(f, 0), j = iget(f, 1), k = iget(f, 2);
     const std::array<std::pair<int32_t, int32_t>, 3> edges = {
         std::make_pair(i, j), std::make_pair(j, k), std::make_pair(k, i)};
     for (const auto& e : edges) {
       int32_t u = e.first, v = e.second;
-      std::pair<int32_t, int32_t> key = (u < v) ? std::make_pair(u, v) : std::make_pair(v, u);
+      if (u > v) std::swap(u, v);
+      const std::uint64_t key =
+          (static_cast<std::uint64_t>(static_cast<std::uint32_t>(u)) << 32) |
+          static_cast<std::uint32_t>(v);
       ++edge_count[key];
     }
     std::array<int32_t, 3> tri = {i, j, k};
@@ -103,9 +142,28 @@ ManifoldReport manifold_report(const std::vector<Vec3>& V, const std::vector<Tri
   rep.nonmanifold_edges = nonmanifold;
   rep.duplicate_faces = dup;
   rep.watertight = (boundary == 0) && (nonmanifold == 0) && (nF > 0);
-  rep.area = mesh_area(V, F);
-  rep.signed_volume = signed_volume(V, F);
+  rep.area = mesh_area_impl(V, F);
+  rep.signed_volume = signed_volume_impl(V, F);
   return rep;
+}
+
+}  // namespace
+
+double mesh_area(const std::vector<Vec3>& V, const std::vector<Tri>& F) {
+  return mesh_area_impl(V, F);
+}
+
+double signed_volume(const std::vector<Vec3>& V, const std::vector<Tri>& F) {
+  return signed_volume_impl(V, F);
+}
+
+ManifoldReport manifold_report(const std::vector<Vec3>& V, const std::vector<Tri>& F) {
+  return manifold_report_impl(V, F);
+}
+
+ManifoldReport manifold_report(const std::vector<std::array<double, 3>>& V,
+                               const std::vector<std::array<std::uint32_t, 3>>& F) {
+  return manifold_report_impl(V, F);
 }
 
 }  // namespace meshms

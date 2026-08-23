@@ -13,6 +13,7 @@
 #include "meshms/geom.hpp"
 #include "meshms/intersection.hpp"
 #include "meshms/mesh_state.hpp"
+#include "meshms/parallel.hpp"
 #include "meshms/sas.hpp"
 #include "meshms/sas_patches.hpp"
 #include "meshms/toroidal.hpp"
@@ -25,7 +26,10 @@ void orient_faces(const std::vector<Vec3>& V, std::vector<Tri>& F,
   // Mirror pipeline.orient_faces: a = V[F[:,0]], b = V[F[:,1]], c = V[F[:,2]];
   // wn = cross(b-a, c-a); flip = (wn*N).sum(axis=1) < 0.0; swap F[flip,1] and
   // F[flip,2]. len(F)==0 short-circuit is naturally a no-op here.
-  for (std::size_t f = 0; f < F.size(); ++f) {
+  // Each face is independent (reads V/N const, swaps only F[f] in place), so the
+  // loop is parallel; per-face float math and results are unchanged.
+  parallel_for(0, static_cast<int>(F.size()), [&](int fi) {
+    const std::size_t f = static_cast<std::size_t>(fi);
     const Vec3& a = V[static_cast<std::size_t>(F[f][0])];
     const Vec3& b = V[static_cast<std::size_t>(F[f][1])];
     const Vec3& c = V[static_cast<std::size_t>(F[f][2])];
@@ -33,7 +37,7 @@ void orient_faces(const std::vector<Vec3>& V, std::vector<Tri>& F,
     if (dot(wn, N[f]) < 0.0) {
       std::swap(F[f][1], F[f][2]);
     }
-  }
+  });
 }
 
 namespace {
@@ -114,10 +118,12 @@ Surface build_mesh(const RSComponents& rs, double mesh_size, bool fuse) {
   const std::size_t n_total = state.F.size();
 
   Surface out;
-  out.V = state.V;
-  out.F = state.F;
-  out.N = state.N;
-  out.atom_id = state.vatom;  // per-vertex owning atom (aligned with V)
+  // state is dead after this point except state.tags (read by the fuse branch),
+  // so the four big arrays can be moved out instead of copied.
+  out.V = std::move(state.V);
+  out.F = std::move(state.F);
+  out.N = std::move(state.N);
+  out.atom_id = std::move(state.vatom);  // per-vertex owning atom (aligned with V)
   out.ftype.resize(n_total);
   for (std::size_t f = 0; f < n_total; ++f)
     out.ftype[f] = static_cast<std::uint8_t>(f < n_convex  ? 3   // convex / contact
