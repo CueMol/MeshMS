@@ -1175,7 +1175,10 @@ NeighborsOut build_neighbors(int nhight, const std::vector<int>& hight_set,
   NeighborsOut out;
   out.neighbor_I.assign(static_cast<std::size_t>(nhight) + 1, {});
   out.N_neighbor.assign(static_cast<std::size_t>(nhight) + 1, 0);
-  for (int i = 1; i <= nhight; ++i) {
+  // Each probe i writes only its own fixed slots (neighbor_I[i], N_neighbor[i])
+  // and reads const inputs -> the loop is parallel with no merge step at all;
+  // per-slot contents (first-seen order included) are unchanged.
+  meshms::parallel_for(1, nhight + 1, [&](int i) {
     Vec3 x1 = I[static_cast<std::size_t>(hight_set[static_cast<std::size_t>(i)])];
     int i1 = Iijk[static_cast<std::size_t>(hight_set[static_cast<std::size_t>(i)])][0];
     // seen set seeded with 0 (first-seen order preserved).
@@ -1201,7 +1204,7 @@ NeighborsOut build_neighbors(int nhight, const std::vector<int>& hight_set,
       }
     }
     out.N_neighbor[static_cast<std::size_t>(i)] = static_cast<int>(row.size());
-  }
+  });
   return out;
 }
 
