@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <numbers>
 #include <vector>
 
 #include "meshms/capi.hpp"
@@ -92,7 +93,7 @@ void test_isolated_atom() {
   // mesh_size 0.5 underestimates both by a few percent -- inscribed polyhedron).
   const MeshReport rep = analyze_mesh(m);
   CHECK(rep.watertight);
-  const double area = 4.0 * M_PI * r * r;
+  const double area = 4.0 * std::numbers::pi * r * r;
   const double vol = area * r / 3.0;
   CHECK_NEAR(rep.area, area, 0.05 * area);
   CHECK(rep.signed_volume > 0.0);
