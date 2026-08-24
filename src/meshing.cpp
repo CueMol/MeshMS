@@ -140,15 +140,49 @@ Vec3 normal_sphere(const Vec3& c_sphere, const Vec3& x) {
   return d / std::sqrt(pysq(d.x) + pysq(d.y) + pysq(d.z));
 }
 
+#ifndef MESHMS_FP_FAST
 double acos_clamped_local(double x) {
   if (x > 1.0) x = 1.0;
   else if (x < -1.0) x = -1.0;
   return std::acos(x);
 }
+#endif
+
+#ifdef MESHMS_FP_FAST
+// A deploy build compares angles without taking acos. The pair (grp, c) --
+// grp 0 when the orientation t < 0 (angle = acos(c), in [0,pi]) and grp 1
+// otherwise (angle = 2pi - acos(c), in [pi,2pi]) -- orders exactly like the
+// angle it stands for: the groups are separated at pi, the angle is decreasing
+// in c inside grp 0 and increasing in c inside grp 1. Every angle produced in
+// this file is only ever COMPARED (never consumed as a radian value), so the
+// whole mesher loses its acos calls -- ~10% of serial self time on Apple M2.
+// A tie at exactly pi can resolve differently than the double comparison did;
+// that is inside the fast contract and covered by test_fp_gate.
+struct AngleT {
+  int grp;
+  double c;  // clamped cosine of the in-group acos argument
+};
+inline bool operator<(const AngleT& x, const AngleT& y) {
+  if (x.grp != y.grp) return x.grp < y.grp;
+  return x.grp == 0 ? x.c > y.c : x.c < y.c;
+}
+inline bool operator>(const AngleT& x, const AngleT& y) { return y < x; }
+inline double clamp_pm1(double x) {
+  return x > 1.0 ? 1.0 : (x < -1.0 ? -1.0 : x);
+}
+// Thresholds live in [pi,2pi] (grp 1), where angle = 2pi - acos(c) gives
+// c = cos(angle) directly: cos(5pi/4) = -sqrt(2)/2, cos(5pi/3) = 1/2 (exact).
+inline constexpr AngleT kFivePiOver4{1, -std::numbers::sqrt2 / 2.0};
+inline constexpr AngleT kFivePiOver3{1, 0.5};
+#else
+using AngleT = double;
+inline constexpr double kFivePiOver4 = 5 * std::numbers::pi / 4;
+inline constexpr double kFivePiOver3 = 5.0 / 3.0 * std::numbers::pi;
+#endif
 
 // Angle (counterclockwise) between two neighbour edges e and f; n the sphere
 // normal (angle_sphere.m). e,f are [tail,head] 1-based index pairs.
-double angle_sphere(const Edge& e, const Edge& f, const Vec3& n,
+AngleT angle_sphere(const Edge& e, const Edge& f, const Vec3& n,
                     const std::vector<Vec3>& P) {
   Vec3 u = P[static_cast<std::size_t>(e[0])] - P[static_cast<std::size_t>(e[1])];
   Vec3 v = P[static_cast<std::size_t>(f[1])] - P[static_cast<std::size_t>(f[0])];
@@ -157,23 +191,33 @@ double angle_sphere(const Edge& e, const Edge& f, const Vec3& n,
   double t = sign(dot(u, cross(v, n)));  // sign(det([u;v;n]))
   double nu = std::sqrt(pysq(u.x) + pysq(u.y) + pysq(u.z));
   double nv = std::sqrt(pysq(v.x) + pysq(v.y) + pysq(v.z));
+#ifdef MESHMS_FP_FAST
+  if (nu == 0.0 || nv == 0.0) return AngleT{0, 1.0};  // angle 0
+  return AngleT{t < 0 ? 0 : 1, clamp_pm1(dot(u, v) / (nu * nv))};
+#else
   if (nu == 0.0 || nv == 0.0) return 0.0;  // degenerate; avoid div-by-zero
   double base = acos_clamped_local(dot(u, v) / (nu * nv));
   if (t < 0) return base;
   return TWO_PI - base;
+#endif
 }
 
 // Angle (counterclockwise) between two vectors around axis n (angle_vectors.m).
-double angle_vectors(Vec3 u, Vec3 v, const Vec3& n) {
+AngleT angle_vectors(Vec3 u, Vec3 v, const Vec3& n) {
   u = u - dot(u, n) * n;
   v = v - dot(v, n) * n;
   double t = sign(dot(u, cross(v, n)));
   double nu = norm(u);
   double nv = norm(v);
+#ifdef MESHMS_FP_FAST
+  if (nu == 0.0 || nv == 0.0) return AngleT{0, 1.0};  // angle 0
+  return AngleT{t < 0 ? 0 : 1, clamp_pm1(dot(u, v) / (nu * nv))};
+#else
   if (nu == 0.0 || nv == 0.0) return 0.0;  // degenerate; avoid div-by-zero
   double base = acos_clamped_local(dot(u, v) / (nu * nv));
   if (t < 0) return base;
   return TWO_PI - base;
+#endif
 }
 
 // Tangent vector pointing outwards of the edge e (ne_sphere.m).
@@ -370,7 +414,7 @@ void advancing_front_approach(const Vec3& c_sphere, double r_sphere, int N,
   if (!depth_guard.ok) return;
 
   const double theta = 0.25;
-  const double alpha1 = 5.0 / 3.0 * std::numbers::pi;  // the angle condition param
+  const AngleT alpha1 = kFivePiOver3;  // the angle condition param (5pi/3)
   const double h = d * std::sqrt(3.0) / 2.0;
 
   auto Pt = [&](int idx) -> const Vec3& { return P[static_cast<std::size_t>(idx)]; };
@@ -400,8 +444,8 @@ void advancing_front_approach(const Vec3& c_sphere, double r_sphere, int N,
     if (Nae >= 4 || Nt == 1) {
       Vec3 n1 = normal_sphere(c_sphere, Pt(E(1)[0]));
       Vec3 n2 = normal_sphere(c_sphere, Pt(E(1)[1]));
-      double angle1 = angle_sphere(E(Nae), E(1), n1, P);  // the left angle
-      double angle2 = angle_sphere(E(1), E(2), n2, P);    // the right angle
+      AngleT angle1 = angle_sphere(E(Nae), E(1), n1, P);  // the left angle
+      AngleT angle2 = angle_sphere(E(1), E(2), n2, P);    // the right angle
 
       Vec3 ne = ne_sphere(E(1), n1, n2, P);  // tangent vector outwards
       Vec3 p = testpoint_sphere(E(1), ne, P, h);  // the test point
@@ -425,14 +469,14 @@ void advancing_front_approach(const Vec3& c_sphere, double r_sphere, int N,
           if (dot(ne, Pm1 - PA1) > 0 &&
               (E(1)[0] != E(m)[0] && E(1)[1] != E(m)[0])) {
             int flag = 1;
-            if (m == 3 && angle2 < 5 * std::numbers::pi / 4) {
+            if (m == 3 && angle2 < kFivePiOver4) {
               flag = 0;
-            } else if (m == Nae && angle1 < 5 * std::numbers::pi / 4) {
+            } else if (m == Nae && angle1 < kFivePiOver4) {
               flag = 0;
             } else if (m > 3 && m < Nae) {
-              double angle1_m = angle_vectors(Pt(E(Nae)[0]) - Pt(E(1)[0]),
+              AngleT angle1_m = angle_vectors(Pt(E(Nae)[0]) - Pt(E(1)[0]),
                                               Pt(E(m)[0]) - Pt(E(1)[0]), n1);
-              double angle2_m = angle_vectors(Pt(E(m)[0]) - Pt(E(2)[0]),
+              AngleT angle2_m = angle_vectors(Pt(E(m)[0]) - Pt(E(2)[0]),
                                               Pt(E(2)[1]) - Pt(E(2)[0]), n2);
               if (angle1_m < angle1 || angle2_m < angle2) flag = 0;
             }
@@ -446,9 +490,9 @@ void advancing_front_approach(const Vec3& c_sphere, double r_sphere, int N,
                 edgedist = Dist1_m + Dist2_m;
               } else if (E(m)[0] == E(index_np)[0]) {
                 Vec3 n_m = (Pt(E(m)[0]) - c_sphere) / norm(Pt(E(m)[0]) - c_sphere);
-                double a1 = angle_vectors(Pt(E(1)[0]) - Pt(E(m)[0]),
+                AngleT a1 = angle_vectors(Pt(E(1)[0]) - Pt(E(m)[0]),
                                           Pt(E(m)[1]) - Pt(E(m)[0]), n_m);
-                double a2 = angle_vectors(Pt(E(1)[0]) - Pt(E(index_np)[0]),
+                AngleT a2 = angle_vectors(Pt(E(1)[0]) - Pt(E(index_np)[0]),
                                           Pt(E(index_np)[1]) - Pt(E(index_np)[0]),
                                           n_m);
                 if (m == Nae || a1 > a2) index_np = m;
@@ -535,14 +579,14 @@ void advancing_front_approach(const Vec3& c_sphere, double r_sphere, int N,
           double dist2 = norm(Pt(E(1)[1]) - Pt(E(m)[0]));
 
           int flag = 1;
-          if (m == 3 && angle2 < 5 * std::numbers::pi / 4) {
+          if (m == 3 && angle2 < kFivePiOver4) {
             flag = 0;
-          } else if (m == Nae && angle1 < 5 * std::numbers::pi / 4) {
+          } else if (m == Nae && angle1 < kFivePiOver4) {
             flag = 0;
           } else if (m > 3 && m < Nae) {
-            double angle1_m = angle_vectors(Pt(E(Nae)[0]) - Pt(E(1)[0]),
+            AngleT angle1_m = angle_vectors(Pt(E(Nae)[0]) - Pt(E(1)[0]),
                                             Pt(E(m)[0]) - Pt(E(1)[0]), n1);
-            double angle2_m = angle_vectors(Pt(E(m)[0]) - Pt(E(2)[0]),
+            AngleT angle2_m = angle_vectors(Pt(E(m)[0]) - Pt(E(2)[0]),
                                             Pt(E(2)[1]) - Pt(E(2)[0]), n2);
             if (angle1_m < angle1 || angle2_m < angle2) flag = 0;
           }
@@ -556,9 +600,9 @@ void advancing_front_approach(const Vec3& c_sphere, double r_sphere, int N,
               edgedist = dist1 + dist2;
             } else if (E(m)[0] == E(index_np)[0]) {
               Vec3 n_m = (Pt(E(m)[0]) - c_sphere) / norm(Pt(E(m)[0]) - c_sphere);
-              double a1 = angle_vectors(Pt(E(1)[0]) - Pt(E(m)[0]),
+              AngleT a1 = angle_vectors(Pt(E(1)[0]) - Pt(E(m)[0]),
                                         Pt(E(m)[1]) - Pt(E(m)[0]), n_m);
-              double a2 = angle_vectors(Pt(E(1)[0]) - Pt(E(index_np)[0]),
+              AngleT a2 = angle_vectors(Pt(E(1)[0]) - Pt(E(index_np)[0]),
                                         Pt(E(index_np)[1]) - Pt(E(index_np)[0]),
                                         n_m);
               if (m == Nae || a1 > a2) index_np = m;
@@ -630,7 +674,7 @@ void advancing_front_approach(const Vec3& c_sphere, double r_sphere, int N,
         }
         continue;
       } else if (angle1 > alpha1) {
-        double angle1_2 = angle_vectors(Pt(E(Nae)[0]) - Pt(E(2)[0]),
+        AngleT angle1_2 = angle_vectors(Pt(E(Nae)[0]) - Pt(E(2)[0]),
                                         Pt(E(2)[1]) - Pt(E(2)[0]), n2);
         if (angle1_2 > angle2) {
           collapse_neighbor_sphere(1, c_sphere, r_sphere, T, Nt, Ae, P, Np,
@@ -638,7 +682,7 @@ void advancing_front_approach(const Vec3& c_sphere, double r_sphere, int N,
           continue;
         }
       } else if (angle2 > alpha1) {
-        double angle1_1 = angle_vectors(Pt(E(Nae)[0]) - Pt(E(1)[0]),
+        AngleT angle1_1 = angle_vectors(Pt(E(Nae)[0]) - Pt(E(1)[0]),
                                         Pt(E(2)[1]) - Pt(E(1)[0]), n1);
         if (angle1_1 > angle1) {
           collapse_neighbor_sphere(2, c_sphere, r_sphere, T, Nt, Ae, P, Np,

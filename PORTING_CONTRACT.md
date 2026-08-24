@@ -92,7 +92,11 @@ golden suite. The *robustness* invariants below (the `acos` clip, the `sqrt` gua
 hold in BOTH policies and must never be removed.
 
 When adding code, keep the faithful expression on the strict side of the `#if`:
-never write a bare `x*x` where the reference squared a scalar with `x**2`.
+never write a bare `x*x` where the reference squared a scalar with `x**2`. The
+pattern to follow is `angle_sphere` / `angle_vectors` in `src/meshing.cpp` and
+the coverage tests in `src/sas.cpp`: the `#else` branch is the reference
+implementation verbatim, the `MESHMS_FP_FAST` branch is the rewrite, and the
+comment states the algebraic identity that justifies it.
 
 - Clip every `acos` argument to `[-1, 1]` (`acos_clamped`).
 - Guard `sqrt(max(x, 0))` where the original silently took the real part.
