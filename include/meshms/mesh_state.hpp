@@ -9,6 +9,7 @@
 // global vertex list (0-based output, like MeshState.to_arrays()).
 #include <array>
 #include <cstdint>
+#include <iterator>
 #include <vector>
 
 #include "meshms/mesh.hpp"
@@ -77,21 +78,22 @@ struct MeshState {
                  const std::vector<TagList>& vids = {},
                  const std::vector<int32_t>& patch_vatom = {}) {
     const std::size_t base = V.size();
-    // P[1:] are the real points; P[0] is the dummy slot.
+    // P[1:] are the real points; P[0] is the dummy slot. Bulk inserts write the
+    // identical values in the identical order as the old per-element push_back
+    // loop, without the per-element capacity checks.
     const std::size_t Np = P.empty() ? 0 : P.size() - 1;
-    for (std::size_t k = 1; k <= Np; ++k) {
-      V.push_back(P[k]);
-      tags.push_back(vids.empty() ? TagList{} : vids[k - 1]);
-      vatom.push_back(patch_vatom.empty() ? 0 : patch_vatom[k - 1]);
+    V.insert(V.end(), P.begin() + (P.empty() ? 0 : 1), P.end());
+    if (vids.empty()) {
+      tags.resize(tags.size() + Np);
+    } else {
+      tags.insert(tags.end(), vids.begin(), vids.end());
     }
-    const bool have_nrm = !face_normals.empty();
-    for (std::size_t idx = 0; idx < T.size(); ++idx) {
-      const auto& t = T[idx];
-      F.push_back(Tri{static_cast<int32_t>(t[0] - 1 + static_cast<int>(base)),
-                      static_cast<int32_t>(t[1] - 1 + static_cast<int>(base)),
-                      static_cast<int32_t>(t[2] - 1 + static_cast<int>(base))});
-      if (have_nrm) N.push_back(face_normals[idx]);
+    if (patch_vatom.empty()) {
+      vatom.resize(vatom.size() + Np, 0);
+    } else {
+      vatom.insert(vatom.end(), patch_vatom.begin(), patch_vatom.end());
     }
+    append_faces(T, face_normals, base);
   }
 
   // add_patch overload that MOVES each per-vertex TagList out of `vids` instead
@@ -105,19 +107,35 @@ struct MeshState {
                  const std::vector<int32_t>& patch_vatom = {}) {
     const std::size_t base = V.size();
     const std::size_t Np = P.empty() ? 0 : P.size() - 1;
-    for (std::size_t k = 1; k <= Np; ++k) {
-      V.push_back(P[k]);
-      tags.push_back(vids.empty() ? TagList{} : std::move(vids[k - 1]));
-      vatom.push_back(patch_vatom.empty() ? 0 : patch_vatom[k - 1]);
+    V.insert(V.end(), P.begin() + (P.empty() ? 0 : 1), P.end());
+    if (vids.empty()) {
+      tags.resize(tags.size() + Np);
+    } else {
+      tags.insert(tags.end(), std::make_move_iterator(vids.begin()),
+                  std::make_move_iterator(vids.end()));
     }
+    if (patch_vatom.empty()) {
+      vatom.resize(vatom.size() + Np, 0);
+    } else {
+      vatom.insert(vatom.end(), patch_vatom.begin(), patch_vatom.end());
+    }
+    append_faces(T, face_normals, base);
+  }
+
+  // Shared face-append tail of both add_patch overloads: rebase the 1-based
+  // patch-local triangle indices onto this mesh's 0-based vertex numbering.
+  void append_faces(const std::vector<std::array<int, 3>>& T,
+                    const std::vector<Vec3>& face_normals, std::size_t base) {
     const bool have_nrm = !face_normals.empty();
+    const std::size_t f0 = F.size();
+    F.resize(f0 + T.size());
     for (std::size_t idx = 0; idx < T.size(); ++idx) {
       const auto& t = T[idx];
-      F.push_back(Tri{static_cast<int32_t>(t[0] - 1 + static_cast<int>(base)),
-                      static_cast<int32_t>(t[1] - 1 + static_cast<int>(base)),
-                      static_cast<int32_t>(t[2] - 1 + static_cast<int>(base))});
-      if (have_nrm) N.push_back(face_normals[idx]);
+      F[f0 + idx] = Tri{static_cast<int32_t>(t[0] - 1 + static_cast<int>(base)),
+                        static_cast<int32_t>(t[1] - 1 + static_cast<int>(base)),
+                        static_cast<int32_t>(t[2] - 1 + static_cast<int>(base))};
     }
+    if (have_nrm) N.insert(N.end(), face_normals.begin(), face_normals.end());
   }
 
   // Reserve capacity for `nv` more vertices and `nf` more faces ahead of an

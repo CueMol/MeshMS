@@ -30,6 +30,11 @@ struct Ctx {
   double rj = 0.0;
   const std::vector<double>* Rj = nullptr;  // GLOBAL segment index -> neighbour VdW radius
   int depth = 0;                            // advancing-front recursion depth
+  // Shared grow-only Dist scratch for sweep 2. Safe across the recursion: every
+  // recursive call site breaks out of the while loop immediately after, so a
+  // parent frame never reads Dist again once a child may have overwritten it,
+  // and each iteration fully rewrites Dist[1..Nae] before any read.
+  std::vector<double> dist;
 };
 
 // The frame loop is already bounded -- `while (k <= N)` increments k on every
@@ -63,6 +68,9 @@ AeList new_ae() { return AeList(1); }
 AeList ae_from_rows(const AeList& src, int lo, int hi) {
   // src[lo..hi] inclusive (1-based, may be empty if lo > hi).
   AeList out(1);
+  // Callers push at most two more rows after this, so one reservation covers the
+  // whole build: without it every front rebuild pays ~log2(Nae) reallocations.
+  out.reserve(static_cast<std::size_t>(hi >= lo ? hi - lo + 1 : 0) + 3);
   for (int k = lo; k <= hi; ++k) out.push_back(src[static_cast<std::size_t>(k)]);
   return out;
 }
@@ -167,26 +175,24 @@ void arc_division(const Vec3& c, double r, const Vec3& P1, const Vec3& P2,
 
   int Ndiv = static_cast<int>(N_division);
 
-  Vec3 u = (P1 - c) / r;
-  Vec3 v{n.y * u.z - n.z * u.y, n.z * u.x - n.x * u.z, n.x * u.y - n.y * u.x};
-
-  std::vector<Vec3> points;
-  std::vector<Edge> edges;
-  for (int j = 0; j < Ndiv; ++j) {
-    double angle_j = static_cast<double>(j) / Ndiv * angle;
-    Vec3 P_j = r * std::cos(angle_j) * u + r * std::sin(angle_j) * v + c;
-    points.push_back(P_j);
-    edges.push_back(Edge{Np + j + 1, Np + j + 2});
-  }
-
+  // The degenerate-arc early return depends only on Ndiv, the endpoints and the
+  // angle -- not on the generated points -- so test it BEFORE generating and push
+  // straight into P/Ae. Same values in the same order; the per-arc points/edges
+  // scratch vectors (two heap allocations per arc segment) disappear.
   if (Ndiv == 1 && norm(P2 - P1) < 1e-10 && angle < 0.1) {
     return;
   }
 
-  for (const Vec3& pt : points) P.push_back(pt);
-  Np = Np + Ndiv;
+  Vec3 u = (P1 - c) / r;
+  Vec3 v{n.y * u.z - n.z * u.y, n.z * u.x - n.x * u.z, n.x * u.y - n.y * u.x};
 
-  for (const Edge& e : edges) Ae.push_back(e);
+  for (int j = 0; j < Ndiv; ++j) {
+    double angle_j = static_cast<double>(j) / Ndiv * angle;
+    Vec3 P_j = r * std::cos(angle_j) * u + r * std::sin(angle_j) * v + c;
+    P.push_back(P_j);
+    Ae.push_back(Edge{Np + j + 1, Np + j + 2});
+  }
+  Np = Np + Ndiv;
   Nae = Nae + Ndiv;
 }
 
@@ -320,10 +326,9 @@ void advancing_front_approach(const Vec3& c_sphere, double r_sphere, int N,
   auto Pt = [&](int idx) -> const Vec3& { return P[static_cast<std::size_t>(idx)]; };
   auto E = [&](int idx) -> Edge& { return Ae[static_cast<std::size_t>(idx)]; };
 
-  // One Dist scratch per afa frame, reused across while iterations (S3): it is
-  // re-assigned to Nae+1 and fully overwritten by the m=1..Nae fill before any
-  // read each iteration, so contents are identical -- only allocations drop.
-  std::vector<double> Dist;
+  // Dist lives in ctx (see Ctx::dist): one allocation per patch instead of one
+  // per afa frame, and grow-only so the reallocation count is O(log max Nae).
+  std::vector<double>& Dist = ctx.dist;
 
   int k = 1;
   while (k <= N) {
@@ -457,7 +462,11 @@ void advancing_front_approach(const Vec3& c_sphere, double r_sphere, int N,
       index_nactive = 0;
 
       PA1 = Pt(E(1)[0]);
-      Dist.assign(static_cast<std::size_t>(Nae) + 1, 0.0);  // Dist[0] dummy
+      // Grow-only: Dist[1..Nae] is fully overwritten below before any read and
+      // Dist[0] is never read, so the assign()'s zero-fill (an O(Nae) memset
+      // every iteration) was pure waste.
+      if (Dist.size() < static_cast<std::size_t>(Nae) + 1)
+        Dist.resize(static_cast<std::size_t>(Nae) + 1);
       for (int m = 1; m <= Nae; ++m) {
         Dist[static_cast<std::size_t>(m)] = norm(x - Pt(E(m)[0]));
       }
@@ -884,7 +893,9 @@ LocalMesh mesh_sphpat(const Vec3& c_sphere, double r_sphere,
   std::vector<Vec3> P(1);  // 1-based, P[0] dummy
   int Np = 0;
 
-  AeList Ae = new_ae();
+  // No allocation here: loop_division/circle_division reassign Ae before any
+  // use, and the r_sphere == 0 path never touches it.
+  AeList Ae;
   int Nae = 0;
 
   if (r_sphere != 0) {

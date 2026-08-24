@@ -1312,12 +1312,20 @@ void SESconcavepat_mesh(MeshState& state, const Geom& geom, const DataI& di,
   // ===================== simple concave triangles ======================== //
 
   // PARALLEL S7 (simple-triangle pass): each i with hight[i]==1 emits exactly
-  // ONE LocalMesh; all scratch (loops/segment0/...) is call-local. A fixed
-  // 1-slot-per-i layout (emit=false where hight[i]!=1) keeps the merge order
-  // deterministic (ascending i), then a SERIAL ordered add_patch merge.
-  std::vector<LocalMesh> tri_lm(static_cast<std::size_t>(s) + 1);
-  meshms::parallel_for(1, s + 1, [&](int i) {
-    if (hight[static_cast<std::size_t>(i)] == 1) {
+  // ONE LocalMesh; all scratch (loops/segment0/...) is call-local.
+  // The iteration space is sparse -- only hight[i] == 1 entries do any work --
+  // so compact it first: a full 1..s range hands TBB all-skip chunks (idle
+  // stealing) and allocates s+1 LocalMesh slots for a handful of triangles.
+  // The compact list is ascending in i, so the serial merge order -- and with
+  // it the output -- is unchanged.
+  std::vector<int> tri_idx;
+  for (int i = 1; i <= s; ++i) {
+    if (hight[static_cast<std::size_t>(i)] == 1) tri_idx.push_back(i);
+  }
+  std::vector<LocalMesh> tri_lm(tri_idx.size());
+  meshms::parallel_for(0, static_cast<int>(tri_idx.size()), [&](int t) {
+    const int i = tri_idx[static_cast<std::size_t>(t)];
+    {
       Vec3 c = I[static_cast<std::size_t>(i)];
       int a_i = Iijk[static_cast<std::size_t>(i)][0];
       int a_j = Iijk[static_cast<std::size_t>(i)][1];
@@ -1389,19 +1397,18 @@ void SESconcavepat_mesh(MeshState& state, const Geom& geom, const DataI& di,
       // circle0 empty (Python passes None).
       std::vector<std::array<double, 9>> circle0_empty;
       Tag btag{2, i, 0};  // ("probe", i)
-      tri_lm[static_cast<std::size_t>(i)] =
+      tri_lm[static_cast<std::size_t>(t)] =
           mesh_sphpat(c, Rp, loops, segment0, circle0_empty, patches_row,
                       patchesize_i, Rp, d, nullptr, btag);
       // Attribute each triangle vertex to the nearest of the 3 atoms a_i/a_j/a_k.
-      fill_vatom_nearest3(tri_lm[static_cast<std::size_t>(i)],
+      fill_vatom_nearest3(tri_lm[static_cast<std::size_t>(t)],
                           static_cast<int32_t>(a_i), static_cast<int32_t>(a_j),
                           static_cast<int32_t>(a_k), ci, cj, ck);
     }
   });
   {
     std::size_t add_v = 0, add_f = 0;
-    for (int i = 1; i <= s; ++i) {
-      const LocalMesh& lm = tri_lm[static_cast<std::size_t>(i)];
+    for (const LocalMesh& lm : tri_lm) {
       if (lm.emit) {
         add_v += lm.P.empty() ? 0 : lm.P.size() - 1;
         add_f += lm.T.size();
@@ -1409,8 +1416,7 @@ void SESconcavepat_mesh(MeshState& state, const Geom& geom, const DataI& di,
     }
     state.reserve_extra(add_v, add_f);
   }
-  for (int i = 1; i <= s; ++i) {
-    LocalMesh& lm = tri_lm[static_cast<std::size_t>(i)];
+  for (LocalMesh& lm : tri_lm) {
     if (lm.emit) state.add_patch(lm.P, lm.T, lm.NV, std::move(lm.vids), lm.vatom);
   }
 }
