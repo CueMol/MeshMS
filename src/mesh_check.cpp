@@ -13,8 +13,14 @@
 // element-wise copy of the same three doubles, so results are bit-identical.
 #include "meshms/mesh_check.hpp"
 
+// This TU reports non-finite vertices, so it needs a working isfinite().
+#if defined(__FINITE_MATH_ONLY__) && __FINITE_MATH_ONLY__
+#error "mesh_check.cpp requires a working isfinite(): -ffinite-math-only is forbidden"
+#endif
+
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <unordered_map>
@@ -86,6 +92,16 @@ ManifoldReport manifold_report_impl(const std::vector<VT>& V,
   const int nF = static_cast<int>(F.size());
   rep.n_vertices = nV;
   rep.n_faces = nF;
+
+  // NaN/Inf tripwire. Cheap (one O(nV) pass) and always compiled: a relaxed-FP
+  // deploy build has no golden to diff against, so this is what tells a consumer
+  // the mesh is unusable rather than merely different.
+  int nonfinite = 0;
+  for (std::size_t i = 0; i < V.size(); ++i) {
+    const Vec3 v = vget(V, i);
+    if (!std::isfinite(v.x) || !std::isfinite(v.y) || !std::isfinite(v.z)) ++nonfinite;
+  }
+  rep.nonfinite_vertices = nonfinite;
 
   // Degenerate triangles: repeated vertex index OR |cross| < 1e-12.
   int degen = 0;

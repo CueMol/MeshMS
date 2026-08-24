@@ -161,7 +161,9 @@ Ext data_ext(const Geom& geom, const Neighbors& /*nb*/, const DataI& data_i,
     } else if (sp1 == i) {
       i0 = sp0;
     } else {
-      throw std::runtime_error("error");
+      throw std::runtime_error(
+          "meshms: exterior extraction lost the segment/atom incidence "
+          "(neither endpoint of the segment is the current atom)");
     }
     const int key = (n > 0) ? n : -n;
     const int sl = (n > 0) ? seg_slot(key, i0) : cir_slot(key, i0);

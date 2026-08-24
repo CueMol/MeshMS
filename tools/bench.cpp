@@ -16,11 +16,13 @@
 #include <string>
 #include <vector>
 
+#include "meshms/capi.hpp"
 #include "meshms/concave.hpp"
 #include "meshms/convex.hpp"
 #include "meshms/exterior.hpp"
 #include "meshms/geom.hpp"
 #include "meshms/intersection.hpp"
+#include "meshms/mesh_check.hpp"
 #include "meshms/mesh_state.hpp"
 #include "meshms/params.hpp"
 #include "meshms/pipeline.hpp"
@@ -38,6 +40,7 @@ struct Stage {
   double total = 0, inter = 0, dICir = 0, segpat = 0, ext = 0;
   double convex = 0, concave = 0, torus = 0, orient = 0;
   std::size_t nV = 0;
+  double area = 0.0;  // computed outside the timed region
 };
 
 // One full build_surface (fuse=false) with a per-stage breakdown.
@@ -74,6 +77,9 @@ static Stage run_once(const Geom& geom, double Rp, double d) {
   s.torus = ms(t6, t7);
   s.orient = ms(t7, t8);
   s.nV = V.size();
+  // Outside every timed span: shows how far the mesh itself moved between two
+  // builds, in the same table as the timings.
+  s.area = mesh_area(V, F);
   return s;
 }
 
@@ -88,9 +94,12 @@ int main(int argc, char** argv) {
   if (const char* e = std::getenv("BENCH_REPS")) reps = std::atoi(e);
   if (reps < 1) reps = 1;
 
-  std::printf("%-9s %6s %9s | %8s %9s %8s %7s %7s %7s %7s %6s %6s\n", "mol", "atoms",
+  // Banner names the build, so a pasted table is self-describing about which FP
+  // policy produced it.
+  std::printf("# %s\n", build_info());
+  std::printf("%-9s %6s %9s | %8s %9s %8s %7s %7s %7s %7s %6s %7s %10s\n", "mol", "atoms",
               "total_ms", "inter", "dICir", "segpat", "ext", "convex", "concav", "torus",
-              "orient", "nV");
+              "orient", "nV", "area");
   for (int ai = 2; ai < argc; ++ai) {
     std::string arg = argv[ai];
     auto colon = arg.find(':');
@@ -109,9 +118,10 @@ int main(int argc, char** argv) {
       if (s.total < best.total) best = s;  // keep the fastest complete run
     }
 
-    std::printf("%-9s %6d %9.2f | %8.2f %9.2f %8.2f %7.2f %7.2f %7.2f %7.2f %6.2f %6zu\n",
+    std::printf("%-9s %6d %9.2f | %8.2f %9.2f %8.2f %7.2f %7.2f %7.2f %7.2f %6.2f %7zu %10.3f\n",
                 mol.c_str(), geom.M, best.total, best.inter, best.dICir, best.segpat,
-                best.ext, best.convex, best.concave, best.torus, best.orient, best.nV);
+                best.ext, best.convex, best.concave, best.torus, best.orient, best.nV,
+                best.area);
   }
   return 0;
 }

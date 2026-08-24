@@ -879,7 +879,11 @@ void data_concavepat(ProbePatchSet& pd, int i,
 
   auto min_abs_dist = [&](const std::vector<std::array<double, 5>>& boundary, int N,
                           const Vec3& xpt) {
-    double best = std::numeric_limits<double>::infinity();
+    // DBL_MAX rather than infinity(): `s` is a finite sum of absolute values, so
+    // the minimum is unchanged, and with N == 0 the sentinel still compares
+    // greater than any tolerance. This keeps the mesher free of Inf semantics,
+    // which a relaxed-FP build is permitted to assume away.
+    double best = std::numeric_limits<double>::max();
     for (int r = 1; r <= N; ++r) {
       Vec3 d3 = rget3(boundary[static_cast<std::size_t>(r)], 1) - xpt;
       double s = std::fabs(d3.x) + std::fabs(d3.y) + std::fabs(d3.z);
