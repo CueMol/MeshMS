@@ -84,7 +84,15 @@ signed `patches` list (`+k` → `loops[k]`, `-k` → `circle0[k]`). Key behaviou
 
 ## Numerical faithfulness (do not "optimize" away)
 
-These are deliberate invariants that keep the mesh bit-stable; see `meshms/vec3.hpp`:
+These are deliberate invariants that keep the mesh bit-stable under the DEFAULT
+`MESHMS_FP=strict` policy; see `meshms/vec3.hpp`. A `MESHMS_FP=fast` deploy build
+intentionally drops the two *faithfulness* invariants (`pysq`, the contraction ban)
+and is verified by the equivalence gate `tests/test_fp_gate.cpp` instead of the
+golden suite. The *robustness* invariants below (the `acos` clip, the `sqrt` guard)
+hold in BOTH policies and must never be removed.
+
+When adding code, keep the faithful expression on the strict side of the `#if`:
+never write a bare `x*x` where the reference squared a scalar with `x**2`.
 
 - Clip every `acos` argument to `[-1, 1]` (`acos_clamped`).
 - Guard `sqrt(max(x, 0))` where the original silently took the real part.
@@ -92,5 +100,9 @@ These are deliberate invariants that keep the mesh bit-stable; see `meshms/vec3.
   `x**2`; it differs from `x*x` by up to 1 ULP, which is enough to flip a `<`/`<=`
   boundary test and change the SAS triple-point set. Keep the float term/evaluation
   order identical to the reference in dot/cross/circlecenter.
-- `-ffp-contract=off` is mandatory (see [`OPTIMIZATION.md`](OPTIMIZATION.md)): an
-  FMA contraction would change the last-bit rounding and break the golden gate.
+- `-ffp-contract=off` is mandatory in the strict policy (see
+  [`OPTIMIZATION.md`](OPTIMIZATION.md)): an FMA contraction would change the
+  last-bit rounding and break the golden gate. `MESHMS_FP=fast` enables it
+  deliberately. `-ffast-math`/`-Ofast` are rejected in BOTH policies -- they imply
+  `-ffinite-math-only`, which folds `isfinite()` away and so disables the NaN
+  tripwire the deploy gate rests on.

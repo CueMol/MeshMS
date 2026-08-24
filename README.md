@@ -25,10 +25,50 @@ ctest --test-dir build --output-on-failure
 
 The CMake uses `file(GLOB CONFIGURE_DEPENDS)`: every `src/*.cpp` joins the
 `MeshMS` library, every `tests/test_*.cpp` becomes its own CTest case — add files,
-no `CMakeLists.txt` edit needed. Options: `MESHMS_WITH_CGAL` (default OFF, zero
-third-party deps), `MESHMS_SANITIZE`, `MESHMS_NATIVE`, `MESHMS_TBB` (default ON;
-oneTBB from the cuemol2 deplibs — point `CMAKE_PREFIX_PATH` / `TBB_DIR` at it, or
-`-DMESHMS_TBB=OFF` for a serial, dependency-free build).
+no `CMakeLists.txt` edit needed.
+
+| option | default | effect |
+|---|---|---|
+| `MESHMS_FP` | `strict` | FP policy: `strict` (bit-exact, golden-gated) or `fast` (deploy) — see **Numerical modes** |
+| `MESHMS_TBB` | `ON` | oneTBB from the cuemol2 deplibs — point `CMAKE_PREFIX_PATH` / `TBB_DIR` at it, or `OFF` for a serial, dependency-free build |
+| `MESHMS_NATIVE` | `OFF` | `-march=native -O3` |
+| `MESHMS_ARCH` | *(empty)* | ISA baseline for redistributable builds. `avx2` is portable — it expands to `-march=x86-64-v3` / `/arch:AVX2` on x86-64 and is ignored elsewhere, so one build script can pass it everywhere. Any other value goes through verbatim as `-march=<v>` / `/arch:<v>`. Use this, not `native` |
+| `MESHMS_LTO` | `OFF` | interprocedural optimization. A static library built with LTO carries bitcode, so the consumer must use a matching toolchain |
+| `MESHMS_SANITIZE` | `OFF` | ASan/UBSan for the fragile mesher |
+| `MESHMS_WITH_CGAL` | `OFF` | reserved; the CGAL gate cross-checker is not built |
+
+## Numerical modes
+
+| mode | for | golden bit gate | what it guarantees |
+|---|---|---|---|
+| `strict` (default) | development, bug reproduction, reference comparison | on (21/21) | reproduces the reference implementation to the last bit |
+| `fast` | deploy (cuemol2/cuemol3) | off (9 tests skip) | never throws, no NaN vertices, `close_cusps` still watertight, area/volume within 0.1% of strict |
+
+`fast` enables FMA contraction and a small unsafe-math subset, and switches
+`pysq(x)` from `pow(x, 2.0)` to `x*x`. It gives up bit-for-bit reproducibility, so
+the nine golden bit-regression tests skip themselves there and `tests/test_fp_gate.cpp`
+— an equivalence gate against a frozen strict baseline — takes over. `-ffast-math`
+and `-Ofast` are rejected in **both** modes (they would disable the NaN tripwire and
+set FTZ/DAZ for the whole host process); see [`OPTIMIZATION.md`](OPTIMIZATION.md).
+
+```sh
+# deploy build for linking into cuemol2/cuemol3
+cmake -S . -B build-deploy -G Ninja -DCMAKE_BUILD_TYPE=Release \
+      -DMESHMS_FP=fast -DMESHMS_ARCH=avx2 \
+      -DMESHMS_TBB=ON -DCMAKE_PREFIX_PATH=<deplibs root> \
+      -DCMAKE_INSTALL_PREFIX=<install root>
+cmake --build build-deploy && cmake --install build-deploy
+```
+
+Notes for a deploy build: `MESHMS_ARCH=avx2` is the right x86-64 baseline —
+without FMA in the target ISA, neither `/fp:contract` nor `-ffp-contract=fast` can
+emit a single FMA, so `fast` loses half its point on the default x86-64 baseline;
+it is ignored on Apple Silicon, which always has FMA. Never use `native` for a
+redistributable build (it bakes in the build machine's ISA and SIGILLs elsewhere).
+Enable `MESHMS_LTO` only when MeshMS and the final binary use the same toolchain.
+Reproduce any bug on a `strict` build, which is what the golden suite covers.
+`build_info()` reports which policy a binary was built with, and the CLI stamps it
+into the `.vert`/`.face` headers.
 
 ## Using the library
 
@@ -64,9 +104,9 @@ finish and validate a surface:
 | `close_cusps(mesh, weld_tol)` | weld + fan-fill cusp/singular seams into a fully closed manifold (drops `atom_id`) |
 | `remove_flaps(mesh)` | drop spurious doubled-"flap" triangles (no-op on a clean mesh; keeps `atom_id`) |
 | `vertex_normals(verts, faces)` | area-weighted per-vertex normals (to refresh after a consumer-side edit) |
-| `analyze_mesh(mesh)` → `MeshReport` | vertices/faces, area, signed volume, watertightness, boundary/non-manifold edge counts |
+| `analyze_mesh(mesh)` → `MeshReport` | vertices/faces, area, signed volume, watertightness, boundary/non-manifold edge counts, non-finite vertex count |
 | `boundary_diagnostics(mesh)` → loops + non-manifold edges | localize open holes/seams (centroid, edge count, closed?) |
-| `version()` | library version string |
+| `version()`, `build_info()` | semver string; and the build configuration (FP policy, parallel backend) for logs and bug reports |
 
 `MeshResult` always carries `vnormals` (per-vertex normals) and, on the build and
 `remove_flaps` paths, `atom_id` (1-based per-vertex owning atom; value `i` refers
@@ -105,7 +145,7 @@ worked example of consuming libMeshMS the way cuemol2/3 does.
 
 The faithful, CGAL-free port is complete. Every pipeline stage is cross-checked
 against a frozen reference oracle (per-stage integer topology EXACT and floats
-within 1e-9, or exact-match meshes); 18/18 ctest green.
+within 1e-9, or exact-match meshes); 21/21 ctest green.
 
 | C++ unit | computes | golden test |
 |---|---|---|
@@ -123,14 +163,27 @@ within 1e-9, or exact-match meshes); 18/18 ctest green.
 | `fusion` | ID-based boundary fusion (`fuse_by_id`) | `test_fusion` |
 | `weld`, `mesh_check` | weld/fill/flap repair + manifold report | `test_weld`, `test_mesh_check` |
 | `capi` (public facade) | the API above | `test_capi`, `test_capi_post`, `test_rscache`, `test_atomid` |
+| *(end-to-end, both FP modes)* | no throw / no NaN / bounded vertices / aggregates vs a frozen baseline / `close_cusps` watertight | `test_fp_gate` (11 molecule×density cases) |
 
 End-to-end the mesh reproduces the reference SES: topology EXACT, geometry within
 1e-9 (bit-exact on 4/6 golden molecules; the rest differ only at the last ULP from
 libm transcendental rounding). The optional close-cusps path produces a watertight
 2-manifold.
 
+A `MESHMS_FP=fast` build is held to `test_fp_gate` instead: the nine golden
+bit-regression tests skip themselves, the other eleven plus the gate stay green.
+The gate compares aggregates (vertex/face counts within 2%, area and signed volume
+within 0.1%, no increase in duplicate faces or non-manifold edges) against a
+strict-built baseline, and checks the properties that need no baseline at all — the
+build does not throw, no vertex is non-finite, every vertex stays inside the atom
+bounding box, and `close_cusps` still closes what it closed before. A consumer of a
+fast build should call `analyze_mesh()` once and confirm `nonfinite_vertices == 0`.
+
 Out of scope (deferred): analytic area/volume, the symmetry-jitter degenerate
-fallback, and all CGAL acceleration (power-diagram).
+fallback, and all CGAL acceleration (power-diagram). The missing symmetry fallback
+is not only theoretical: `tests/data/fullerene.xyzr` (a perfectly symmetric C60)
+currently meshes to a broken surface — about half its vertices come out NaN — in a
+strict build as well, which is why it is excluded from `test_fp_gate`.
 
 ## Reference docs & fixtures
 

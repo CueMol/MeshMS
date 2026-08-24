@@ -45,23 +45,113 @@ calls `add_patch` in order (skipping empty meshes exactly as before).
 Single-thread micro-opts: `col_of` map → `std::lower_bound` over the sorted CSR row;
 per-frame `Dist` scratch reuse in the advancing front; `reserve()` hints.
 
-## Build flags (critical)
+## Build flags: the FP policy (critical)
 
-`-ffp-contract=off` is **mandatory and always on**: with `-march=native`, g++ otherwise
-fuses `a*b+c` into an FMA, changing the last-bit rounding and flipping the ULP-sensitive SAS
-boundary tests (the bit-for-bit golden gate). Options: `MESHMS_NATIVE` (`-march=native -O3`),
+`MESHMS_FP` selects the floating-point semantics the library is compiled with. It is the
+only knob that changes the numbers; `-O3`, `-march=native` and oneTBB never do.
+
+| | `strict` (default) | `fast` (deploy) |
+|---|---|---|
+| GNU / Clang | `-ffp-contract=off` | `-ffp-contract=fast -fno-math-errno -fno-trapping-math -fno-signed-zeros -freciprocal-math` |
+| MSVC | `/fp:precise /fp:contract:off` | `/fp:precise /fp:contract` |
+| `pysq(x)` | `pow(x, 2.0)` | `x * x` |
+| gated by | the golden suite (bit-for-bit) | `test_fp_gate` (equivalence) |
+
+**Why strict has to be strict.** With FMA contraction, `a*b+c` fuses, the last-bit rounding
+changes, and the ULP-sensitive SAS boundary tests (`disc <= 0`, `pysq(q+rij)+pp-Rext2 < 0`,
+`c > 0` in `sas.cpp`) flip. That changes the triple-point set and with it the whole integer
+topology. `pysq` is the same story from the source side: `pow(x, 2.0)` and `x*x` differ by up
+to 1 ULP on ~0.08% of inputs.
+
+**What fast is allowed to break, and what it is not.** `fast` gives up the *faithfulness*
+constructs -- `pysq` and the contraction ban. It does NOT touch the *robustness* constructs:
+`acos_clamped`, `sqrt(max(x, 0))` and the divide-by-zero guards stay in both policies.
+
+**Flags deliberately excluded from `fast`, and rejected outright at configure time**
+(`-ffast-math`, `-Ofast`, `-ffinite-math-only`, `-funsafe-math-optimizations`,
+`-fapprox-func`, `/fp:fast`; override with `MESHMS_ALLOW_UNSAFE_FP_FLAGS=ON`):
+
+- **`-ffinite-math-only`** folds `isfinite()`/`isnan()` to a constant. The deploy gate's
+  primary tripwire is `MeshReport::nonfinite_vertices`, so this flag would disable exactly
+  the check that tells a consumer the mesh is unusable rather than merely different.
+- **`-ffast-math` / `-Ofast` / `-funsafe-math-optimizations`** all match GCC's crtfastmath.o
+  link spec (`%{Ofast|ffast-math|funsafe-math-optimizations:%{!shared:crtfastmath.o%s}}`),
+  which sets FTZ/DAZ for the **whole host process**. `libMeshMS.a` is linked into cuemol2;
+  silently changing the host application's FP mode is not ours to do. The individual flags
+  `fast` does use match no such spec.
+- **`-fassociative-math`** (implied by `-funsafe-math-optimizations`) buys almost nothing
+  here -- the parallel design deliberately has no float reductions -- while it *would*
+  reassociate the sequential sums in `mesh_area`/`signed_volume`, the very quantities the
+  gate measures.
+
+`meshms/vec3.hpp` carries an `#error` on `__FAST_MATH__` and `mesh_check.cpp` one on
+`__FINITE_MATH_ONLY__`, so the ban also holds when the flag arrives from outside CMake.
+
+### Measured (Apple M2, AppleClang 15, Release + `-march=native` + oneTBB, best-of-15)
+
+| mol | d | strict | fast | gain |
+|---|--:|--:|--:|--:|
+| 1crn | 0.5 | 3.95 ms | 3.89 ms | ~0% |
+| barstar | 0.5 | 10.40 ms | 10.06 ms | 3% |
+| 101M | 0.5 | 13.81 ms | 13.03 ms | 4% |
+| 101M | 0.25 | 30.33 ms | 28.92 ms | 4% |
+| barstar | 0.25 | 19.54 ms | 18.87 ms | 3% |
+
+**On macOS the gain is small, and the reason is specific**: `nm` shows a *strict* build of
+`libMeshMS.a` contains no `pow` reference at all -- AppleClang already folds `pow(x, 2.0)` at
+all 56 `pysq` sites. So `-fno-math-errno` has nothing left to win, and the source-level
+`pysq` switch is a no-op there. Full `-ffast-math` was measured too and reached only 4-5%,
+so the excluded flags are not where the time is either.
+
+**On GCC and MSVC the picture should differ**: neither folds `pow(x, 2.0)` under the default
+FP settings, so `fast` removes 56 real libm calls -- 11 of them in `data_I_Cir` (55% of the
+serial time) and 16 in the concave mesher (13%). On MSVC that source-level switch is the
+*only* lever, because `/fp:precise` never folds `pow` and MSVC has no `-fno-math-errno`.
+
+Contraction needs the instruction to exist. On Apple Silicon FMA is always there; on x86-64
+the default baseline has none, so `/fp:contract` and `-ffp-contract=fast` emit nothing until
+the target says otherwise -- pass `MESHMS_ARCH=avx2` for an Intel/AMD deploy build.
+
+None of this has been measured here; measure before assuming, on the target platform, with
+`meshms_bench` (its banner prints the policy).
+
+Other options: `MESHMS_NATIVE` (`-march=native -O3`), `MESHMS_ARCH` (ISA baseline for
+redistributable builds; `avx2` expands to `-march=x86-64-v3` / `/arch:AVX2` on x86-64 and is
+ignored elsewhere, any other value passes through verbatim; `native` bakes in the build
+machine's ISA and SIGILLs elsewhere), `MESHMS_LTO` (off by default; a static library built
+with LTO carries bitcode and requires a matching consumer toolchain),
 `MESHMS_TBB` (default ON; `meshms::parallel_for` falls back to a serial loop when
 `MESHMS_WITH_TBB` is undefined, so a TBB-off build runs serially and identically).
 
 ```sh
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DMESHMS_NATIVE=ON \
       -DMESHMS_TBB=ON -DCMAKE_PREFIX_PATH=<deplibs root>   # oneTBB from cuemol2 deplibs
-cmake --build build && ctest --test-dir build          # 18/18, parallel (oneTBB)
+cmake --build build && ctest --test-dir build          # 21/21, parallel (oneTBB)
 cmake -S . -B build-serial -G Ninja -DMESHMS_TBB=OFF
-ctest --test-dir build-serial                          # 18/18, serial (same output)
-# bench: g++ -std=c++20 -O3 -march=native -ffp-contract=off -I include \
-#   tools/bench.cpp build/libMeshMS.a -ltbb -o /tmp/bench ; /tmp/bench tests/data 101M:0.6
+ctest --test-dir build-serial                          # 21/21, serial (same output)
+
+# deploy build, and the A/B against it
+cmake -S . -B build-fast -G Ninja -DCMAKE_BUILD_TYPE=Release -DMESHMS_FP=fast
+cmake --build build-fast && ctest --test-dir build-fast   # 9 skipped, 12 green
+BENCH_REPS=15 ./build/meshms_bench      tests/data 101M:0.5 101M:0.25 barstar:0.25
+BENCH_REPS=15 ./build-fast/meshms_bench tests/data 101M:0.5 101M:0.25 barstar:0.25
 ```
+
+### Safety valves in a relaxed-FP build
+
+The frame loop of the advancing front is already bounded (`while (k <= N)`, `k` always
+increments). The unbounded path is the mutual recursion
+`advancing_front_approach` <-> `collapse_nonneighbor{1,2}_sphere`, where
+`collapse_nonneighbor2_sphere` can hand the callee a *larger* front. `Ctx::depth` +
+`kMaxFrontDepth` (4096) caps it: a frame that hits the cap returns without closing its
+front, which leaves a hole the gate sees as extra boundary edges -- a detectable degradation
+rather than a stack overflow. A strict build never reaches it (the golden suite is the
+proof), and the guard costs one compare per frame, never per triangle.
+
+`geom_from_array` rejects non-finite coordinates and negative radii at the facade boundary
+(radius 0 stays valid -- barstar.xyzr has 503 such atoms), and `manifold_report` reports
+`nonfinite_vertices` so a consumer can check a deploy-built mesh with one `analyze_mesh()`
+call.
 
 ## Remaining serial tail (future, smaller payoff)
 

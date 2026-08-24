@@ -6,6 +6,11 @@ name: CI
 # because transcendental rounding (acos/sqrt) can diverge at the last ULP on a
 # different libm even with FMA contraction disabled. Integer/topology checks are exact
 # and portable; only the floating-geometry compare is libm-sensitive.
+#
+# A third lane builds the deploy FP policy (-DMESHMS_FP=fast). There the nine golden
+# bit-regression tests skip themselves and test_fp_gate -- the equivalence gate -- is
+# what has to stay green. It runs serial (TBB=OFF) because the FP policy and the
+# parallel backend are orthogonal: the two lanes above already cover TBB.
 
 on:
   push:
@@ -117,6 +122,49 @@ jobs:
         shell: bash
         run: cmake --build build -j
 
+      - name: Test (gating on Linux, advisory on macOS/Windows)
+        shell: bash
+        continue-on-error: ${{ matrix.advisory }}
+        run: ctest --test-dir build --output-on-failure
+
+  # --- Deploy FP policy: relaxed floating point, gated by the equivalence gate ---
+  build-fp-fast:
+    name: fp-fast / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  advisory: false }
+          - { os: macos-latest,   advisory: true  }
+          - { os: windows-latest, advisory: true  }
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up CMake and Ninja
+        uses: lukka/get-cmake@latest
+
+      - name: Set up MSVC environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      # MESHMS_ARCH=avx2 matches the intended x86-64 deploy baseline: without FMA
+      # in the target ISA, -ffp-contract=fast / /fp:contract emit nothing. Every
+      # GitHub runner supports AVX2, and the alias is ignored on macOS ARM64.
+      - name: Configure (MESHMS_FP=fast, serial)
+        shell: bash
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DMESHMS_FP=fast
+          -DMESHMS_ARCH=avx2
+          -DMESHMS_TBB=OFF
+
+      - name: Build
+        shell: bash
+        run: cmake --build build -j
+
+      # The golden bit tests report as Skipped here; test_fp_gate carries the lane.
       - name: Test (gating on Linux, advisory on macOS/Windows)
         shell: bash
         continue-on-error: ${{ matrix.advisory }}
