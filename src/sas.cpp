@@ -128,6 +128,35 @@ std::pair<DataI, DataCir> data_I_Cir(const Geom& geom, const Neighbors& nb, doub
       const double rij = std::sqrt(disc);
 
       // Test if the circle is entirely covered by a sphere Sk.
+#ifdef MESHMS_FP_FAST
+      // sqrt-free form: with q = sqrt(1-ctheta^2)*da and p = (ctheta*da)^2 the
+      // cross terms cancel, (q+rij)^2 + p == da^2 + rij^2 + 2*rij*q, so the
+      // covered test  (q+rij)^2 + p < Rext2[k]  is  2*rij*q < D  with
+      // D = Rext2[k] - da^2 - rij^2, i.e.  D > 0 && 4*rij^2*q^2 < D^2  -- both
+      // sides nonnegative, so squaring preserves the strict inequality. rij^2
+      // is `disc` exactly (rij = sqrt(disc)). This removes the two sqrt calls
+      // per neighbour in the hottest O(sum Ri^2) loop of the pipeline. In this
+      // build the scratches hold q^2 and da^2 (the whole-circle retest below
+      // needs both); a strict build stores q and p unchanged.
+      const double rij2 = disc;
+      for (int row = 1; row <= Ri; ++row) {
+        const int k = Mint(i, row);
+        if (k != j) {
+          Vec3 a = A - C[k];
+          const double da2 = dot(a, a);
+          const double h = dot(a, normal) / dist_normal;  // signed axial offset
+          double q2 = da2 - h * h;  // squared in-plane offset of C[k]
+          if (q2 < 0.0) q2 = 0.0;  // rounding can push it barely negative
+          q_scratch[static_cast<std::size_t>(row)] = q2;
+          p_scratch[static_cast<std::size_t>(row)] = da2;
+          const double D = Rext2[static_cast<std::size_t>(k)] - da2 - rij2;
+          if (D > 0.0 && 4.0 * rij2 * q2 < D * D) {
+            circletest = 0;
+            break;
+          }
+        }
+      }
+#else
       for (int row = 1; row <= Ri; ++row) {
         const int k = Mint(i, row);
         if (k != j) {
@@ -144,6 +173,7 @@ std::pair<DataI, DataCir> data_I_Cir(const Geom& geom, const Neighbors& nb, doub
           }
         }
       }
+#endif
 
       if (circletest == 1) {
         for (int row2 = 1; row2 <= Ri; ++row2) {
@@ -152,12 +182,23 @@ std::pair<DataI, DataCir> data_I_Cir(const Geom& geom, const Neighbors& nb, doub
           if (k < j && circletest == 1) {  // test if circle is a whole circle
             // Reuse the pre-loop's q/p for this row: -sqrt(...)*dist_a == -q
             // exactly (IEEE multiply sign symmetry), pysq(ctheta*dist_a) == p.
+#ifdef MESHMS_FP_FAST
+            // (-q+rij)^2 + p == da^2 + rij^2 - 2*rij*q, so "covered" is
+            // -2*rij*q < D: automatic for D > 0, else 4*rij^2*q^2 > D^2.
+            const double da2 = p_scratch[static_cast<std::size_t>(row2)];
+            const double q2 = q_scratch[static_cast<std::size_t>(row2)];
+            const double D = Rext2[static_cast<std::size_t>(k)] - da2 - rij2;
+            if (D > 0.0 || 4.0 * rij2 * q2 > D * D) {
+              circletest = 0;
+            }
+#else
             if (pysq(-q_scratch[static_cast<std::size_t>(row2)] + rij) +
                     p_scratch[static_cast<std::size_t>(row2)] -
                     Rext2[static_cast<std::size_t>(k)] <
                 0) {
               circletest = 0;
             }
+#endif
           }
 
           // 1-based column of k in atom j's neighbor row (row3) via binary
@@ -200,6 +241,30 @@ std::pair<DataI, DataCir> data_I_Cir(const Geom& geom, const Neighbors& nb, doub
               // Integer guard first: the norm for ll == j / ll == k was computed
               // and discarded (its value never observable), so skipping it changes
               // nothing.
+#ifdef MESHMS_FP_FAST
+              // Both sides nonnegative: compare squared distances against the
+              // precomputed Rext2 table and skip the sqrt per neighbour.
+              int true1 = 1;
+              for (int row = 1; row <= Ri; ++row) {
+                const int ll = Mint(i, row);
+                if (ll == j || ll == k) continue;
+                const Vec3 d1v = C[static_cast<std::size_t>(ll)] - Y1;
+                if (dot(d1v, d1v) < Rext2[static_cast<std::size_t>(ll)]) {
+                  true1 = 0;
+                  break;
+                }
+              }
+              int true2 = 1;
+              for (int row = 1; row <= Ri; ++row) {
+                const int ll = Mint(i, row);
+                if (ll == j || ll == k) continue;
+                const Vec3 d2v = C[static_cast<std::size_t>(ll)] - Y2;
+                if (dot(d2v, d2v) < Rext2[static_cast<std::size_t>(ll)]) {
+                  true2 = 0;
+                  break;
+                }
+              }
+#else
               int true1 = 1;
               for (int row = 1; row <= Ri; ++row) {
                 const int ll = Mint(i, row);
@@ -220,6 +285,7 @@ std::pair<DataI, DataCir> data_I_Cir(const Geom& geom, const Neighbors& nb, doub
                   break;
                 }
               }
+#endif
 
               // Record Y1 then Y2 (same order as the original push_back blocks).
               if (true1 == 1) {
