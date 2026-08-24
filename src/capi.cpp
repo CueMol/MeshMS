@@ -16,6 +16,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <stdexcept>
+#include <string>
 #include <utility>
 
 #include "meshms/geom.hpp"
@@ -59,6 +61,18 @@ Geom geom_from_array(const std::vector<std::array<double, 4>>& xyzr) {
   g.R.assign(static_cast<std::size_t>(m) + 1, 0.0);                        // entry 0 dummy
   for (int a = 1; a <= m; ++a) {
     const std::array<double, 4>& c = xyzr[static_cast<std::size_t>(a - 1)];
+    // Reject non-finite or negative input here, at the facade boundary: a NaN
+    // coordinate from a malformed structure would otherwise propagate silently
+    // through every stage and surface as a NaN mesh. read_xyzr stays untouched
+    // -- it is the faithful reader for the golden fixtures.
+    // Radius 0 IS valid and stays accepted: the xyzr convention uses it for
+    // atoms that do not contribute to the surface (barstar.xyzr has 503).
+    if (!std::isfinite(c[0]) || !std::isfinite(c[1]) || !std::isfinite(c[2]) ||
+        !std::isfinite(c[3]) || c[3] < 0.0) {
+      throw std::invalid_argument(
+          "meshms: atom " + std::to_string(a - 1) +
+          " has a non-finite coordinate or a negative radius");
+    }
     g.centers[static_cast<std::size_t>(a)] = Vec3{c[0], c[1], c[2]};
     g.R[static_cast<std::size_t>(a)] = c[3];
   }
@@ -339,6 +353,7 @@ MeshReport analyze_mesh(const MeshResult& mesh) {
   MeshReport out;
   out.n_vertices = static_cast<std::uint32_t>(rep.n_vertices);
   out.n_faces = static_cast<std::uint32_t>(rep.n_faces);
+  out.nonfinite_vertices = static_cast<std::uint32_t>(rep.nonfinite_vertices);
   out.degenerate_faces = static_cast<std::uint32_t>(rep.degenerate_faces);
   out.duplicate_faces = static_cast<std::uint32_t>(rep.duplicate_faces);
   out.boundary_edges = static_cast<std::uint32_t>(rep.boundary_edges);

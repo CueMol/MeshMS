@@ -29,6 +29,28 @@ struct Ctx {
   int nactive = 0;
   double rj = 0.0;
   const std::vector<double>* Rj = nullptr;  // GLOBAL segment index -> neighbour VdW radius
+  int depth = 0;                            // advancing-front recursion depth
+};
+
+// The frame loop is already bounded -- `while (k <= N)` increments k on every
+// iteration -- so the only unbounded path through the mesher is the mutual
+// recursion advancing_front_approach <-> collapse_nonneighbor{1,2}_sphere, where
+// collapse_nonneighbor2_sphere can hand the callee a LARGER front. A relaxed-FP
+// build (MESHMS_FP=fast) may flip the boundary tests that decide how the front
+// splits, so cap the depth rather than risk a stack overflow. A frame that hits
+// the cap returns without closing its front, leaving a hole the equivalence gate
+// sees as extra boundary edges -- a detectable degradation instead of a crash.
+// A strict build never reaches it (the golden suite is the proof) and the guard
+// costs one compare per frame, never per triangle.
+constexpr int kMaxFrontDepth = 4096;
+
+struct FrontDepthGuard {
+  Ctx& ctx;
+  const bool ok;
+  explicit FrontDepthGuard(Ctx& c) : ctx(c), ok(c.depth < kMaxFrontDepth) { ++ctx.depth; }
+  ~FrontDepthGuard() { --ctx.depth; }
+  FrontDepthGuard(const FrontDepthGuard&) = delete;
+  FrontDepthGuard& operator=(const FrontDepthGuard&) = delete;
 };
 
 // ---------------------------------------------------------------------------
@@ -288,6 +310,9 @@ void advancing_front_approach(const Vec3& c_sphere, double r_sphere, int N,
                               std::vector<Tri3>& T, int& Nt, AeList& Ae, int& Nae,
                               std::vector<Vec3>& P, int& Np, double d,
                               double tolerance, double Rp, Ctx& ctx) {
+  const FrontDepthGuard depth_guard(ctx);
+  if (!depth_guard.ok) return;
+
   const double theta = 0.25;
   const double alpha1 = 5.0 / 3.0 * std::numbers::pi;  // the angle condition param
   const double h = d * std::sqrt(3.0) / 2.0;

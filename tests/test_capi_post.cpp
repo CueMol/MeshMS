@@ -19,25 +19,6 @@ using namespace meshms;
 
 namespace {
 
-// Minimal xyzr loader (consumer side): skip blank/'#' rows, take the first 4
-// columns. Mirrors read_xyzr so the array feeds the same surface.
-std::vector<std::array<double, 4>> load_array(const std::string& path) {
-  std::ifstream in(path);
-  std::vector<std::array<double, 4>> out;
-  std::string line;
-  while (std::getline(in, line)) {
-    std::size_t i = 0;
-    while (i < line.size() && std::isspace(static_cast<unsigned char>(line[i]))) ++i;
-    if (i == line.size() || line[i] == '#') continue;
-    std::istringstream ls(line);
-    std::vector<double> c;
-    double v;
-    while (ls >> v) c.push_back(v);
-    if (c.size() >= 4) out.push_back({c[0], c[1], c[2], c[3]});
-  }
-  return out;
-}
-
 double vlen(const std::array<double, 3>& n) {
   return std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
 }
@@ -50,7 +31,7 @@ int main() {
   CHECK(std::string(version()).size() > 0);
 
   const std::string xyzr = std::string(MESHMS_DATA_DIR) + "/ArgArg.xyzr";
-  std::vector<std::array<double, 4>> arr = load_array(xyzr);
+  std::vector<std::array<double, 4>> arr = load_xyzr_array(xyzr);
   CHECK(!arr.empty());
 
   // --- fused build is a clean, watertight 2-manifold -------------------------

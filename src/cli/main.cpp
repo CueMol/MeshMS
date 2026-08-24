@@ -157,7 +157,7 @@ void write_msms(const std::string& base, const MeshResult& m, int natom,
 
   char hdr[128], buf[256];
   std::ofstream vf = open_out(base + ".vert");
-  vf << "# MSMS solvent excluded surface vertices, libMeshMS " << meshms::version() << "\n"
+  vf << "# MSMS solvent excluded surface vertices, libMeshMS " << meshms::build_info() << "\n"
      << "#vertex #sphere density probe_r\n";
   std::snprintf(hdr, sizeof(hdr), "%7zu %7d %8.3f %8.3f", nv, natom, density, probe);
   vf << hdr << "\n";
@@ -171,7 +171,7 @@ void write_msms(const std::string& base, const MeshResult& m, int natom,
   }
 
   std::ofstream ff = open_out(base + ".face");
-  ff << "# MSMS solvent excluded surface faces, libMeshMS " << meshms::version() << "\n"
+  ff << "# MSMS solvent excluded surface faces, libMeshMS " << meshms::build_info() << "\n"
      << "#faces #sphere density probe_r\n";
   std::snprintf(hdr, sizeof(hdr), "%7zu %7d %8.3f %8.3f", nf, natom, density, probe);
   ff << hdr << "\n";
@@ -289,6 +289,14 @@ int main(int argc, char** argv) {
   std::printf("  area     : %.3f\n", rep.area);
   std::printf("  watertight: %s  (boundary edges: %d)\n",
               rep.watertight ? "True" : "False", static_cast<int>(rep.boundary_edges));
+  // A relaxed-FP build has no bit-exact reference to diff against, so surface
+  // this unconditionally: anything but 0 means the mesh is unusable, not merely
+  // different from a strict build.
+  if (rep.nonfinite_vertices != 0) {
+    std::printf("  WARNING  : %d non-finite vertex/vertices (mesh is unusable)\n",
+                static_cast<int>(rep.nonfinite_vertices));
+  }
+  if (verbose) std::printf("  build    : %s\n", meshms::build_info());
 
   if (!rep.watertight && verbose) {
     const meshms::BoundaryDiagnostics diag = meshms::boundary_diagnostics(m);

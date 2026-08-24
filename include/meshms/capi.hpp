@@ -78,6 +78,18 @@ MeshResult build_surface_from_array(
 // Library version string, e.g. "0.1.0". Safe to call at any time.
 const char* version();
 
+// Human-readable build configuration: version, FP policy, parallel backend.
+// Unlike version() -- which is a semver string embedded in the MSMS .vert/.face
+// headers -- this is free-form and meant for logs and bug reports. A surface
+// produced by a relaxed-FP deploy build is identifiable from it.
+const char* build_info();
+
+// FP policy the LIBRARY was compiled with: 0 = strict (bit-exact, golden-gated),
+// 1 = fast (deploy). Compare against MESHMS_FP_FAST to detect a header/library
+// mismatch, which would mean the inline math in the internal headers was
+// compiled under a different policy than the library.
+int fp_mode();
+
 // ===== Mesh post-processing =================================================
 // Each takes a MeshResult and returns a new one. vnormals in the result are
 // recomputed (area-weighted) from the returned geometry, so they stay valid.
@@ -109,6 +121,10 @@ std::vector<std::array<double, 3>> vertex_normals(
 struct MeshReport {
   std::uint32_t n_vertices = 0;
   std::uint32_t n_faces = 0;
+  // Vertices with a NaN or Inf component. A build with a relaxed FP policy
+  // (MESHMS_FP=fast) has no bit-exact reference to diff against, so a consumer
+  // should check this once after building a surface: 0 means usable.
+  std::uint32_t nonfinite_vertices = 0;
   std::uint32_t degenerate_faces = 0;   // repeated index or |cross| < 1e-12
   std::uint32_t duplicate_faces = 0;    // same vertex triple seen more than once
   std::uint32_t boundary_edges = 0;     // edges used by exactly one face

@@ -11,6 +11,16 @@
 #include <numbers>
 #include <utility>
 
+// -ffast-math / -Ofast are rejected in BOTH policies, MESHMS_FP=fast included.
+// They imply -ffinite-math-only, which folds isfinite()/isnan() to a constant and
+// so disables the NaN detection the deploy gate rests on, and they make GCC/Clang
+// pull crtfastmath.o into the final executable, setting FTZ/DAZ for the whole host
+// process (unacceptable for a library linked into cuemol2). MESHMS_FP=fast picks a
+// subset that does neither. See OPTIMIZATION.md.
+#if defined(__FAST_MATH__) && !defined(MESHMS_ALLOW_UNSAFE_FP)
+#error "MeshMS headers must not be compiled with -ffast-math / -Ofast; use -DMESHMS_FP=fast"
+#endif
+
 namespace meshms {
 
 // 2*np.pi in IEEE-754 double (std::numbers::pi == numpy's np.pi).
@@ -52,7 +62,15 @@ inline double sign(double x) { return static_cast<double>((x > 0.0) - (x < 0.0))
 // Python source wrote `x ** 2` on a SCALAR, so the C++ matches the golden to the
 // last ULP. (numpy ARRAY x**2 *is* x*x; and mathutil.circlecenter writes r1*r1
 // literally -> those squares stay '*' in both Python and C++.)
+#ifdef MESHMS_FP_FAST
+// A deploy build trades that last ULP for speed. pow(x, 2.0) is a real libm call
+// on GCC and on MSVC /fp:precise (Apple clang already folds it), and pysq sits in
+// the hot data_I_Cir and concave loops -- 56 call sites in all. The golden gate
+// is replaced by the equivalence gate (tests/test_fp_gate.cpp) in this mode.
+inline double pysq(double x) { return x * x; }
+#else
 inline double pysq(double x) { return std::pow(x, 2.0); }
+#endif
 
 // Clamp to [-1, 1] then arccos (mathutil._acos_clamped).
 inline double acos_clamped(double x) {
