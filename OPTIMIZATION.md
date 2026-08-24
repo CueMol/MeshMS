@@ -153,6 +153,30 @@ proof), and the guard costs one compare per frame, never per triangle.
 `nonfinite_vertices` so a consumer can check a deploy-built mesh with one `analyze_mesh()`
 call.
 
+## Round 3a (2026-08): allocation + serial-merge pass (bit-exact)
+
+Gated like every round: golden ctest green on the TBB and serial builds, unchanged
+bytes. Three commits (Apple M2, best-of-15, 101M d=0.25; cumulative TBB 30.1 -> 23.1 ms
+(-23%), serial 116 -> 96.7 ms (-17%)):
+
+- **Allocator traffic** (was ~30% of serial self time; tbbmalloc_proxy measured
+  SLOWER than the system allocator on macOS, so the fix is fewer allocations, not a
+  different allocator): ae_from_rows reserves; the sweep-2 Dist scratch moved into
+  Ctx and stopped being zero-filled (the assign()'s O(Nae) memset per iteration was
+  pure waste); arc_division tests its early return before generating and pushes
+  straight into P/Ae; add_patch appends by bulk insert; the concave simple-triangle
+  pass compacts its sparse iteration space.
+- **Patch-parallel scatter merge** (was ~14 of 31 ms at 8T): merge_local_meshes
+  keeps the exact merge order via a serial prefix sum of the base indices, then
+  copies patches into disjoint slices in a parallel_for, freeing each dead
+  LocalMesh on the worker that copied it. torus went from 1.7x to ~2.5x scaling.
+- **Advancing front as a ring buffer**: the per-triangle front rewrites are O(1)
+  head/tail moves instead of full O(Nae) rebuilds; splits use per-recursion-depth
+  spare rings (a deque -- parents hold references into earlier slots).
+
+Also fixed: tools/bench.cpp timed a ~10 MB V/F deep copy inside the orient span
+(the real pipeline moves them), inflating that column ~6x.
+
 ## Remaining serial tail (future, smaller payoff)
 
 At 28T@101M the serial-ish remainder is `data_Seg_Pat` (~1.6 ms), `data_ext` (flood-fill,
