@@ -21,6 +21,14 @@
 //                auto m1 = build_mesh_from_cache(rs, 0.25);          // density 2
 //     The cache holds the density-independent RS components; only the (cheap)
 //     mesher re-runs per density.
+//
+// Multi-component inputs are supported at this layer: the atoms are split into
+// connected components of the SAS-intersection graph, the pipeline runs per
+// component, and the meshes are concatenated (components in ascending order of
+// their smallest atom index). An isolated atom (no SAS neighbour) is meshed
+// directly as its full vdW sphere (icosphere at the requested mesh_size,
+// face_type 3). atom_id always refers to the caller's input array. An empty
+// input yields an empty mesh.
 #include <array>
 #include <cstdint>
 #include <memory>

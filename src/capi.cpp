@@ -1,13 +1,25 @@
 // Implementation of the C++17-safe public facade (capi.hpp). Compiled as part of
 // meshms_core (C++20); only the HEADER is constrained to C++17.
+//
+// Multi-component support lives HERE, above the faithful pipeline: the input is
+// split into connected components of the SAS-intersection graph (the same
+// dist < (R_a+Rp)+(R_b+Rp) predicate interstructure() uses), the unchanged
+// pipeline runs per component, and the meshes are concatenated. Isolated atoms
+// (no SAS neighbour), which the faithful exterior extraction cannot represent
+// (it throws "isolated SAS-ball" or silently drops unreachable components), are
+// meshed directly as full vdW spheres. A single-component input takes the exact
+// pre-existing path, so the golden gates are unaffected.
 #include "meshms/capi.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <utility>
 
 #include "meshms/geom.hpp"
+#include "meshms/intersection.hpp"
 #include "meshms/mesh.hpp"
 #include "meshms/mesh_check.hpp"
 #include "meshms/pipeline.hpp"
@@ -16,9 +28,22 @@
 
 namespace meshms {
 
-// Opaque cache definition: just wraps the internal RSComponents.
+// Opaque cache definition: the density-independent RS components of every
+// connected component (>= 2 atoms each), plus the isolated atoms meshed as
+// full spheres. `orig` maps a component-local 1-based atom index back to the
+// 0-based index into the caller's xyzr array, so the merged mesh's atom_id
+// keeps referring to the caller's array.
 struct RSCache {
-  RSComponents rs;
+  struct Component {
+    RSComponents rs;
+    std::vector<std::uint32_t> orig;  // comp-local atom a -> orig[a-1] (0-based)
+  };
+  struct Isolated {
+    std::uint32_t orig;          // 0-based index into the caller's xyzr
+    std::array<double, 4> xyzr;  // {x, y, z, radius}
+  };
+  std::vector<Component> comps;
+  std::vector<Isolated> isolated;
 };
 
 namespace {
@@ -40,26 +65,7 @@ Geom geom_from_array(const std::vector<std::array<double, 4>>& xyzr) {
   return g;
 }
 
-// Surface (internal) -> MeshResult (facade): plain element-wise copy.
-MeshResult to_result(const Surface& s) {
-  MeshResult r;
-  r.verts.reserve(s.V.size());
-  for (const Vec3& v : s.V) r.verts.push_back({v.x, v.y, v.z});
-  r.vnormals.reserve(s.NV.size());
-  for (const Vec3& n : s.NV) r.vnormals.push_back({n.x, n.y, n.z});
-  r.faces.reserve(s.F.size());
-  for (const Tri& f : s.F) {
-    r.faces.push_back({static_cast<std::uint32_t>(f[0]),
-                       static_cast<std::uint32_t>(f[1]),
-                       static_cast<std::uint32_t>(f[2])});
-  }
-  r.atom_id.reserve(s.atom_id.size());
-  for (std::int32_t a : s.atom_id) r.atom_id.push_back(static_cast<std::uint32_t>(a));
-  r.face_type = s.ftype;  // per-face SES type, aligned with faces
-  return r;
-}
-
-// MeshResult arrays -> internal Vec3/Tri (the inverse of to_result's copy).
+// MeshResult arrays -> internal Vec3/Tri (the inverse of append_surface's copy).
 std::vector<Vec3> to_vec3(const std::vector<std::array<double, 3>>& verts) {
   std::vector<Vec3> V;
   V.reserve(verts.size());
@@ -112,25 +118,183 @@ std::vector<Vec3> vnormals_from_faces(const std::vector<Vec3>& V,
   return Nv;
 }
 
+// Connected components of the SAS-intersection graph, via interstructure()
+// (the exact predicate the pipeline itself uses) + union-find. Returns one
+// ascending 0-based index list per component, components ordered by their
+// smallest member -- fully deterministic.
+std::vector<std::vector<std::uint32_t>> sas_components(
+    const std::vector<std::array<double, 4>>& xyzr, double radius_probe) {
+  const int m = static_cast<int>(xyzr.size());
+  std::vector<int> parent(static_cast<std::size_t>(m) + 1);
+  for (int a = 0; a <= m; ++a) parent[static_cast<std::size_t>(a)] = a;
+  auto find = [&parent](int a) {
+    while (parent[static_cast<std::size_t>(a)] != a) {
+      parent[static_cast<std::size_t>(a)] =
+          parent[static_cast<std::size_t>(parent[static_cast<std::size_t>(a)])];
+      a = parent[static_cast<std::size_t>(a)];
+    }
+    return a;
+  };
+
+  const Neighbors nb = interstructure(geom_from_array(xyzr), radius_probe);
+  for (int a = 1; a <= m; ++a) {
+    for (std::int32_t b : nb.of(a)) {
+      const int ra = find(a), rb = find(static_cast<int>(b));
+      if (ra != rb) parent[static_cast<std::size_t>(std::max(ra, rb))] = std::min(ra, rb);
+    }
+  }
+
+  // Group 1-based atoms by root; map roots to components in first-seen
+  // (= ascending smallest-member) order.
+  std::vector<std::vector<std::uint32_t>> comps;
+  std::vector<int> comp_of_root(static_cast<std::size_t>(m) + 1, -1);
+  for (int a = 1; a <= m; ++a) {
+    const int r = find(a);
+    if (comp_of_root[static_cast<std::size_t>(r)] < 0) {
+      comp_of_root[static_cast<std::size_t>(r)] = static_cast<int>(comps.size());
+      comps.emplace_back();
+    }
+    comps[static_cast<std::size_t>(comp_of_root[static_cast<std::size_t>(r)])]
+        .push_back(static_cast<std::uint32_t>(a - 1));
+  }
+  return comps;
+}
+
+// Append one component's Surface to the merged MeshResult: vertex indices are
+// offset by the current vertex count and atom_id is remapped through `orig`
+// back to the caller's array. With base == 0 and an identity `orig` (the
+// single-component case) every emitted value equals to_result's -- bit-for-bit.
+void append_surface(MeshResult& out, const Surface& s,
+                    const std::vector<std::uint32_t>& orig) {
+  const std::uint32_t base = static_cast<std::uint32_t>(out.verts.size());
+  out.verts.reserve(out.verts.size() + s.V.size());
+  for (const Vec3& v : s.V) out.verts.push_back({v.x, v.y, v.z});
+  out.vnormals.reserve(out.vnormals.size() + s.NV.size());
+  for (const Vec3& n : s.NV) out.vnormals.push_back({n.x, n.y, n.z});
+  out.faces.reserve(out.faces.size() + s.F.size());
+  for (const Tri& f : s.F) {
+    out.faces.push_back({base + static_cast<std::uint32_t>(f[0]),
+                         base + static_cast<std::uint32_t>(f[1]),
+                         base + static_cast<std::uint32_t>(f[2])});
+  }
+  out.atom_id.reserve(out.atom_id.size() + s.atom_id.size());
+  for (std::int32_t a : s.atom_id) {
+    out.atom_id.push_back(
+        a == 0 ? 0u : orig[static_cast<std::size_t>(a - 1)] + 1u);
+  }
+  out.face_type.insert(out.face_type.end(), s.ftype.begin(), s.ftype.end());
+}
+
+// Append a full sphere mesh (icosphere) for an isolated atom: its SES is its
+// vdW sphere. The subdivision level is chosen so the edge length is <=
+// mesh_size; normals are the exact radial directions; faces wind outward
+// (positive signed volume); face_type is 3 (convex) for every face.
+void append_isolated_sphere(MeshResult& out, const RSCache::Isolated& iso,
+                            double mesh_size) {
+  const double r = iso.xyzr[3];
+  if (!(r > 0.0)) return;  // degenerate radius: nothing to mesh
+
+  // Unit icosahedron (outward-wound), t = golden ratio.
+  const double t = (1.0 + std::sqrt(5.0)) / 2.0;
+  std::vector<Vec3> dirs = {
+      {-1, t, 0}, {1, t, 0},   {-1, -t, 0}, {1, -t, 0},
+      {0, -1, t}, {0, 1, t},   {0, -1, -t}, {0, 1, -t},
+      {t, 0, -1}, {t, 0, 1},   {-t, 0, -1}, {-t, 0, 1}};
+  for (Vec3& d : dirs) d = d / std::sqrt(pysq(d.x) + pysq(d.y) + pysq(d.z));
+  std::vector<Tri> faces = {
+      {0, 11, 5}, {0, 5, 1},  {0, 1, 7},   {0, 7, 10}, {0, 10, 11},
+      {1, 5, 9},  {5, 11, 4}, {11, 10, 2}, {10, 7, 6}, {7, 1, 8},
+      {3, 9, 4},  {3, 4, 2},  {3, 2, 6},   {3, 6, 8},  {3, 8, 9},
+      {4, 9, 5},  {2, 4, 11}, {6, 2, 10},  {8, 6, 7},  {9, 8, 1}};
+
+  // Unit icosahedron edge length is 4/sqrt(10+2*sqrt(5)) ~= 1.05146; each
+  // subdivision halves it. Cap the level so a tiny mesh_size cannot explode.
+  const double edge0 = 4.0 / std::sqrt(10.0 + 2.0 * std::sqrt(5.0));
+  int level = 0;
+  while (level < 7 && edge0 * r / static_cast<double>(1 << level) > mesh_size)
+    ++level;
+
+  for (int s = 0; s < level; ++s) {
+    std::map<std::pair<std::int32_t, std::int32_t>, std::int32_t> midpoint;
+    auto mid = [&](std::int32_t a, std::int32_t b) {
+      const std::pair<std::int32_t, std::int32_t> key = std::minmax(a, b);
+      auto it = midpoint.find(key);
+      if (it != midpoint.end()) return it->second;
+      Vec3 mvec = dirs[static_cast<std::size_t>(a)] + dirs[static_cast<std::size_t>(b)];
+      mvec = mvec / std::sqrt(pysq(mvec.x) + pysq(mvec.y) + pysq(mvec.z));
+      const std::int32_t idx = static_cast<std::int32_t>(dirs.size());
+      dirs.push_back(mvec);
+      midpoint.emplace(key, idx);
+      return idx;
+    };
+    std::vector<Tri> next;
+    next.reserve(faces.size() * 4);
+    for (const Tri& f : faces) {
+      const std::int32_t ab = mid(f[0], f[1]);
+      const std::int32_t bc = mid(f[1], f[2]);
+      const std::int32_t ca = mid(f[2], f[0]);
+      next.push_back({f[0], ab, ca});
+      next.push_back({f[1], bc, ab});
+      next.push_back({f[2], ca, bc});
+      next.push_back({ab, bc, ca});
+    }
+    faces = std::move(next);
+  }
+
+  const std::uint32_t base = static_cast<std::uint32_t>(out.verts.size());
+  const Vec3 c{iso.xyzr[0], iso.xyzr[1], iso.xyzr[2]};
+  for (const Vec3& d : dirs) {
+    out.verts.push_back({c.x + d.x * r, c.y + d.y * r, c.z + d.z * r});
+    out.vnormals.push_back({d.x, d.y, d.z});
+    out.atom_id.push_back(iso.orig + 1u);
+  }
+  for (const Tri& f : faces) {
+    out.faces.push_back({base + static_cast<std::uint32_t>(f[0]),
+                         base + static_cast<std::uint32_t>(f[1]),
+                         base + static_cast<std::uint32_t>(f[2])});
+    out.face_type.push_back(3);  // convex (contact), MSMS code
+  }
+}
+
 }  // namespace
 
 std::shared_ptr<RSCache> compute_rs_from_array(
     const std::vector<std::array<double, 4>>& xyzr, double radius_probe) {
   auto cache = std::make_shared<RSCache>();
-  cache->rs = compute_rs(geom_from_array(xyzr), radius_probe);
+  for (const std::vector<std::uint32_t>& comp : sas_components(xyzr, radius_probe)) {
+    if (comp.size() == 1) {
+      cache->isolated.push_back(
+          RSCache::Isolated{comp[0], xyzr[static_cast<std::size_t>(comp[0])]});
+      continue;
+    }
+    // Sub-array in ascending original order, so a single-component input
+    // reproduces geom_from_array(xyzr) exactly (identity `orig`).
+    std::vector<std::array<double, 4>> sub;
+    sub.reserve(comp.size());
+    for (std::uint32_t i : comp) sub.push_back(xyzr[static_cast<std::size_t>(i)]);
+    RSCache::Component c;
+    c.rs = compute_rs(geom_from_array(sub), radius_probe);
+    c.orig = comp;
+    cache->comps.push_back(std::move(c));
+  }
   return cache;
 }
 
 MeshResult build_mesh_from_cache(const std::shared_ptr<RSCache>& rs,
                                  double mesh_size, bool fuse) {
-  return to_result(build_mesh(rs->rs, mesh_size, fuse));
+  MeshResult out;
+  for (const RSCache::Component& comp : rs->comps)
+    append_surface(out, build_mesh(comp.rs, mesh_size, fuse), comp.orig);
+  for (const RSCache::Isolated& iso : rs->isolated)
+    append_isolated_sphere(out, iso, mesh_size);
+  return out;
 }
 
 MeshResult build_surface_from_array(
     const std::vector<std::array<double, 4>>& xyzr, double radius_probe,
     double mesh_size, bool fuse) {
-  RSComponents rs = compute_rs(geom_from_array(xyzr), radius_probe);
-  return to_result(build_mesh(rs, mesh_size, fuse));
+  return build_mesh_from_cache(compute_rs_from_array(xyzr, radius_probe),
+                               mesh_size, fuse);
 }
 
 // version() is defined in version.cpp (declared in capi.hpp).

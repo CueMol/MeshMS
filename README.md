@@ -75,6 +75,15 @@ to `atoms[i-1]`, `0` = unknown) so a consumer can colour the surface by atom, pl
 `2` concave/spherical-reentrant, `1` toroidal — the MSMS face-type codes; carried
 through `remove_flaps`, empty after `close_cusps`).
 
+**Multi-component inputs** are handled by the facade: the atoms are split into
+connected components of the SAS-intersection graph, the (unchanged) pipeline runs
+per component, and the meshes are concatenated. Isolated atoms — single atoms
+whose SAS sphere touches nothing, which the faithful exterior extraction cannot
+represent — are meshed directly as full vdW spheres (icosphere at the requested
+`mesh_size`). So a protein plus stray waters/ions, or several detached chains,
+all appear in one mesh, with `atom_id` still referring to the input array. A
+single-component input takes the exact pre-existing pipeline path bit-for-bit.
+
 ## CLI
 
 ```sh
