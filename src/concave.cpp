@@ -1291,22 +1291,15 @@ void SESconcavepat_mesh(MeshState& state, const Geom& geom, const DataI& di,
     mesh_probe_patchset(probe_lm[static_cast<std::size_t>(i)],
                         decomp.probes[static_cast<std::size_t>(i)], I, Rp, d);
   });
+  // Ordered merge (probe ascending, then patch ascending), patch-parallel.
   {
-    std::size_t add_v = 0, add_f = 0;
+    std::vector<LocalMesh*> order;
     for (int i = 1; i <= nhight; ++i) {
-      for (const LocalMesh& lm : probe_lm[static_cast<std::size_t>(i)]) {
-        if (lm.emit) {
-          add_v += lm.P.empty() ? 0 : lm.P.size() - 1;
-          add_f += lm.T.size();
-        }
+      for (LocalMesh& lm : probe_lm[static_cast<std::size_t>(i)]) {
+        if (lm.emit) order.push_back(&lm);
       }
     }
-    state.reserve_extra(add_v, add_f);
-  }
-  for (int i = 1; i <= nhight; ++i) {
-    for (LocalMesh& lm : probe_lm[static_cast<std::size_t>(i)]) {
-      if (lm.emit) state.add_patch(lm.P, lm.T, lm.NV, std::move(lm.vids), lm.vatom);
-    }
+    merge_local_meshes(state, order);
   }
 
   // ===================== simple concave triangles ======================== //
@@ -1406,18 +1399,13 @@ void SESconcavepat_mesh(MeshState& state, const Geom& geom, const DataI& di,
                           static_cast<int32_t>(a_k), ci, cj, ck);
     }
   });
+  // Ordered merge (ascending i), patch-parallel.
   {
-    std::size_t add_v = 0, add_f = 0;
-    for (const LocalMesh& lm : tri_lm) {
-      if (lm.emit) {
-        add_v += lm.P.empty() ? 0 : lm.P.size() - 1;
-        add_f += lm.T.size();
-      }
+    std::vector<LocalMesh*> order;
+    for (LocalMesh& lm : tri_lm) {
+      if (lm.emit) order.push_back(&lm);
     }
-    state.reserve_extra(add_v, add_f);
-  }
-  for (LocalMesh& lm : tri_lm) {
-    if (lm.emit) state.add_patch(lm.P, lm.T, lm.NV, std::move(lm.vids), lm.vatom);
+    merge_local_meshes(state, order);
   }
 }
 

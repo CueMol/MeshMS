@@ -495,31 +495,23 @@ void data_SEStorpat(MeshState& state, const Geom& geom, const DataI& di,
     }
   });
 
-  // --- SERIAL ordered merge (segments ascending, then circles ascending) -
-  // Pre-sum the emitted sizes so the accumulator reserves once (capacity-only),
-  // and move the per-vertex tag lists out of the dead LocalMesh.
-  std::size_t add_v = 0, add_f = 0;
-  auto count_lm = [&](const std::array<LocalMesh, 2>& pair) {
-    for (const LocalMesh& lm : pair) {
-      if (lm.emit) {
-        add_v += lm.P.empty() ? 0 : lm.P.size() - 1;
-        add_f += lm.T.size();
-      }
-    }
-  };
-  for (int i = 1; i <= nsegment; ++i) count_lm(seg_lm[static_cast<std::size_t>(i)]);
-  for (int i = 1; i <= ncircle; ++i) count_lm(crc_lm[static_cast<std::size_t>(i)]);
-  state.reserve_extra(add_v, add_f);
+  // --- ordered merge (segments ascending, then circles ascending) --------
+  // Same order and bytes as the old serial add_patch loop; the copies run
+  // patch-parallel (merge_local_meshes). The toroidal stage has the cheapest
+  // per-vertex compute of the three meshers, so the serial merge dominated its
+  // wall time (1.7x scaling on 8 threads before this change).
+  std::vector<LocalMesh*> order;
   for (int i = 1; i <= nsegment; ++i) {
     for (LocalMesh& lm : seg_lm[static_cast<std::size_t>(i)]) {
-      if (lm.emit) state.add_patch(lm.P, lm.T, lm.NV, std::move(lm.vids), lm.vatom);
+      if (lm.emit) order.push_back(&lm);
     }
   }
   for (int i = 1; i <= ncircle; ++i) {
     for (LocalMesh& lm : crc_lm[static_cast<std::size_t>(i)]) {
-      if (lm.emit) state.add_patch(lm.P, lm.T, lm.NV, std::move(lm.vids), lm.vatom);
+      if (lm.emit) order.push_back(&lm);
     }
   }
+  merge_local_meshes(state, order);
 }
 
 }  // namespace meshms

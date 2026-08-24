@@ -10,6 +10,7 @@
 
 #include <cmath>
 
+#include "meshms/parallel.hpp"
 #include "meshms/vec3.hpp"
 
 namespace meshms {
@@ -960,6 +961,61 @@ LocalMesh mesh_sphpat(const Vec3& c_sphere, double r_sphere,
     }
   }
   return out;
+}
+
+
+// ---------------------------------------------------------------------------
+// Parallel ordered merge (see meshing.hpp).
+// ---------------------------------------------------------------------------
+void merge_local_meshes(MeshState& state, const std::vector<LocalMesh*>& lms) {
+  const std::size_t n = lms.size();
+
+  // Serial prefix sum of the write bases. These are exactly the
+  // V.size()/F.size()/N.size() values the sequential add_patch calls would have
+  // seen, so every element lands at the same index with the same value.
+  std::vector<std::size_t> bv(n), bf(n), bn(n);
+  std::size_t v = state.V.size(), f = state.F.size(), nn = state.N.size();
+  for (std::size_t i = 0; i < n; ++i) {
+    const LocalMesh& lm = *lms[i];
+    bv[i] = v;
+    bf[i] = f;
+    bn[i] = nn;
+    v += lm.P.empty() ? 0 : lm.P.size() - 1;
+    f += lm.T.size();
+    nn += lm.NV.size();  // add_patch appends N only when normals are present
+  }
+  state.V.resize(v);
+  state.tags.resize(v);      // default TagList{} == the empty-vids case
+  state.vatom.resize(v, 0);  // 0 == the empty-patch_vatom case
+  state.F.resize(f);
+  state.N.resize(nn);
+
+  meshms::parallel_for(0, static_cast<int>(n), [&](int i) {
+    LocalMesh& lm = *lms[static_cast<std::size_t>(i)];
+    const std::size_t base = bv[static_cast<std::size_t>(i)];
+    const std::size_t fbase = bf[static_cast<std::size_t>(i)];
+    const std::size_t nbase = bn[static_cast<std::size_t>(i)];
+    const std::size_t Np = lm.P.empty() ? 0 : lm.P.size() - 1;
+    for (std::size_t k = 1; k <= Np; ++k) state.V[base + k - 1] = lm.P[k];
+    if (!lm.vids.empty()) {
+      for (std::size_t k = 0; k < Np; ++k)
+        state.tags[base + k] = std::move(lm.vids[k]);
+    }
+    if (!lm.vatom.empty()) {
+      for (std::size_t k = 0; k < Np; ++k) state.vatom[base + k] = lm.vatom[k];
+    }
+    for (std::size_t t = 0; t < lm.T.size(); ++t) {
+      const auto& tt = lm.T[t];
+      state.F[fbase + t] =
+          Tri{static_cast<int32_t>(tt[0] - 1 + static_cast<int>(base)),
+              static_cast<int32_t>(tt[1] - 1 + static_cast<int>(base)),
+              static_cast<int32_t>(tt[2] - 1 + static_cast<int>(base))};
+    }
+    for (std::size_t t = 0; t < lm.NV.size(); ++t) state.N[nbase + t] = lm.NV[t];
+    // Free the dead patch here, on the worker: the serial merge previously also
+    // serialised every cross-thread free.
+    lm = LocalMesh{};
+  });
 }
 
 }  // namespace meshms
