@@ -14,7 +14,7 @@
 //     and the VARIABLE-ROW grid (mesh_cusp; t[] array, row_off prefix sums,
 //     index_P, and the intricate t[i+1]==t[i]+1 / t[i+1]==t[i+2]-1 connectivity
 //     branches) are reproduced EXACTLY.
-//   * compute_NV_toroidal orients each face by the analytic torus normal.
+//   * orient_face_toroidal orients each face by the analytic torus normal.
 //   * vids ID-fusion tags use Tag{}; a multi-tag corner stores the FIRST listed
 //     tag (the mesh is identical; full multi-tag fusion is a later step).
 #include "meshms/exterior.hpp"

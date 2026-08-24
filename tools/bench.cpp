@@ -4,10 +4,11 @@
 // best-of-`reps` to suppress scheduler/cache noise; reps defaults to 5 and can
 // be overridden by env BENCH_REPS.
 //
-// Compile (already built into the lib via CMake tools/, or stand-alone):
+// Built as the `meshms_bench` CMake target (top-level builds; MESHMS_BUILD_TOOLS),
+// or stand-alone:
 //   g++ -std=c++20 -O3 -march=native -ffp-contract=off \
 //       -I include tools/bench.cpp build/libMeshMS.a -ltbb -o /tmp/bench
-// Run:  /tmp/bench <data_dir> <mol>:<mesh_size> ...   (oneTBB auto-detects cores)
+// Run:  meshms_bench <data_dir> <mol>:<mesh_size> ... (oneTBB auto-detects cores)
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>

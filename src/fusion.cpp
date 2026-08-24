@@ -8,6 +8,7 @@
 #include <utility>
 #include <vector>
 
+#include "meshms/parallel.hpp"
 #include "meshms/vec3.hpp"
 
 namespace meshms {
@@ -57,6 +58,24 @@ inline Cell cell_of(const Vec3& v, double inv) {
               static_cast<std::int64_t>(std::floor(v.z * inv))};
 }
 
+// Flat (tag, cell) key replacing the old nested tag -> {cell -> [idx]} maps:
+// one hash probe per neighbour cell instead of a tag lookup plus a nested cell
+// lookup. Exact key equality; the hash only affects speed.
+struct TagCell {
+  Tag tag;
+  Cell cell;
+};
+inline bool operator==(const TagCell& a, const TagCell& b) {
+  return a.tag == b.tag && a.cell == b.cell;
+}
+struct TagCellHash {
+  std::size_t operator()(const TagCell& k) const noexcept {
+    std::uint64_t h = TagHash{}(k.tag);
+    h ^= CellHash{}(k.cell) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+    return static_cast<std::size_t>(h);
+  }
+};
+
 }  // namespace
 
 std::tuple<std::vector<Vec3>, std::vector<Tri>, std::vector<int32_t>> fuse_by_id(
@@ -95,9 +114,38 @@ std::tuple<std::vector<Vec3>, std::vector<Tri>, std::vector<int32_t>> fuse_by_id
   const double eps2 = eps * eps;
   const double inv_eps = 1.0 / eps;
 
-  // grid_eps: tag -> {cell -> [idx]} (defaultdict(dict) in Python).
-  using CellMap = std::unordered_map<Cell, std::vector<std::int64_t>, CellHash>;
-  std::unordered_map<Tag, CellMap, TagHash> grid_eps;
+  // TWO-PHASE match (replaces the old serial insert-as-you-go walk). The final
+  // union-find partition is provably order-independent, which makes the split
+  // safe:
+  //   * the match predicate (shared tag, cell within +-1, dot(dv,dv) < eps^2)
+  //     does not depend on union-find state, and dot(vi-vj, vi-vj) is evaluated
+  //     with i as the LATER index -- exactly the pair and expression the old
+  //     walk evaluated when the later of the two vertices was processed;
+  //   * uniting i with the ROOTS of its matches is equivalent to uniting i with
+  //     each matched j (unite re-finds both sides), so the final partition is
+  //     the connected components of the match-pair graph either way;
+  //   * parent[max_root] = min_root keeps every component's root at its minimum
+  //     member regardless of union order, so V2's first-seen order and the
+  //     root's atom id are identical.
+  //
+  // Phase 1 (serial): build the COMPLETE flat (tag, cell) -> [idx] grid.
+  std::unordered_map<TagCell, std::vector<std::int64_t>, TagCellHash> grid_eps;
+  std::vector<Cell> cell_cache(n);  // cell_of(V[i]) for tagged i, reused below
+  {
+    std::size_t ntagged = 0;
+    for (std::size_t i = 0; i < n && i < tags.size(); ++i)
+      if (!tags[i].empty()) ++ntagged;
+    grid_eps.reserve(2 * ntagged + 1);
+  }
+  for (std::size_t i = 0; i < n; ++i) {
+    // tags[i] is None (interior) when the TagList is empty; tags shorter than V
+    // also reads as None past its end (Python: ti = tags[i] if i < len(tags)).
+    if (i >= tags.size() || tags[i].empty()) continue;
+    const Cell ce = cell_of(V[i], inv_eps);
+    cell_cache[i] = ce;
+    for (const Tag& tag : tags[i])
+      grid_eps[TagCell{tag, ce}].push_back(static_cast<std::int64_t>(i));
+  }
 
   // NB offsets in EXACT Python order: dx,dy,dz each over (-1, 0, 1).
   static const int NB[27][3] = {
@@ -107,41 +155,36 @@ std::tuple<std::vector<Vec3>, std::vector<Tri>, std::vector<int32_t>> fuse_by_id
       {1, -1, -1},  {1, -1, 0},  {1, -1, 1},  {1, 0, -1},  {1, 0, 0},  {1, 0, 1},
       {1, 1, -1},   {1, 1, 0},   {1, 1, 1}};
 
-  for (std::size_t i = 0; i < n; ++i) {
-    // tags[i] is None (interior) when the TagList is empty; tags shorter than V
-    // also reads as None past its end (Python: ti = tags[i] if i < len(tags)).
-    if (i >= tags.size() || tags[i].empty()) continue;
-    const TagList& taglist = tags[i];
+  // Phase 2 (parallel per vertex): collect the eps-coincident same-tag partners
+  // j < i of every tagged vertex into its own fixed slot (no shared writes; the
+  // grid is read-only). Keeping only j < i visits each unordered pair exactly
+  // once, from its later endpoint -- the old walk's pair set.
+  std::vector<std::vector<std::int64_t>> match(n);
+  meshms::parallel_for(0, static_cast<int>(n), [&](int ii) {
+    const std::size_t i = static_cast<std::size_t>(ii);
+    if (i >= tags.size() || tags[i].empty()) return;
     const Vec3& vi = V[i];
-    const Cell ce = cell_of(vi, inv_eps);
-
-    // matched = set of roots of eps-coincident same-tag neighbours.
-    std::vector<std::int64_t> matched;  // dedup of roots (union is min/max -> order-free)
-    for (const Tag& tag : taglist) {
-      auto git = grid_eps.find(tag);
-      if (git == grid_eps.end()) continue;
-      const CellMap& cells = git->second;
+    const Cell ce = cell_cache[i];
+    std::vector<std::int64_t>& mi = match[i];
+    for (const Tag& tag : tags[i]) {
       for (const auto& off : NB) {
-        Cell nb{ce.x + off[0], ce.y + off[1], ce.z + off[2]};
-        auto cit = cells.find(nb);
-        if (cit == cells.end()) continue;
+        auto cit = grid_eps.find(
+            TagCell{tag, Cell{ce.x + off[0], ce.y + off[1], ce.z + off[2]}});
+        if (cit == grid_eps.end()) continue;
         for (std::int64_t j : cit->second) {
+          if (j >= static_cast<std::int64_t>(i)) continue;
           Vec3 dv = vi - V[static_cast<std::size_t>(j)];
           double dd = dot(dv, dv);
-          if (dd < eps2) {
-            std::int64_t r = find(j);
-            bool seen = false;
-            for (std::int64_t m : matched)
-              if (m == r) { seen = true; break; }
-            if (!seen) matched.push_back(r);
-          }
+          if (dd < eps2) mi.push_back(j);
         }
       }
     }
-    for (std::int64_t r : matched) unite(static_cast<std::int64_t>(i), r);
+  });
 
-    // append i to grid_eps[tag][ce] for each tag (setdefault(ce, []).append(i)).
-    for (const Tag& tag : taglist) grid_eps[tag][ce].push_back(static_cast<std::int64_t>(i));
+  // Phase 3 (serial): replay the unions in ascending i (any order would yield
+  // the same partition -- see above).
+  for (std::size_t i = 0; i < n; ++i) {
+    for (std::int64_t j : match[i]) unite(static_cast<std::int64_t>(i), j);
   }
 
   // --- deduplicated vertex list from union-find roots (first-seen order) ------

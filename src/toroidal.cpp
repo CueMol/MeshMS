@@ -2,7 +2,7 @@
 //
 // See toroidal.hpp for the faithfulness contract. The local-function structure
 // of the Python module is preserved: _sqrt_pos, coord_toroide, index_P_toroide,
-// coord_cusp, index_P, compute_NV_toroidal, mesh_toroide, mesh_cusp,
+// coord_cusp, index_P, orient_face_toroidal, mesh_toroide, mesh_cusp,
 // data_SEStorpat.
 #include "meshms/toroidal.hpp"
 #include "meshms/parallel.hpp"
@@ -98,28 +98,23 @@ inline std::array<int, 3> index_P(int i1, int j1, int i2, int j2, int i3, int j3
           static_cast<int>(row_off[i3]) + j3 + 1};
 }
 
-// Orient each face by the analytic torus normal. `T` is 1-based triples into the
-// 1-based `P`; `normal` is the per-face analytic normal. Returns outward face
-// normals aligned with `T`.
-std::vector<Vec3> compute_NV_toroidal(const std::vector<std::array<int, 3>>& T,
-                                      const std::vector<Vec3>& P,
-                                      const std::vector<Vec3>& normal) {
-  std::vector<Vec3> NV;
-  NV.reserve(T.size());
-  for (std::size_t idx = 0; idx < T.size(); ++idx) {
-    const Vec3& a = P[static_cast<std::size_t>(T[idx][0])];
-    const Vec3& b = P[static_cast<std::size_t>(T[idx][1])];
-    const Vec3& c = P[static_cast<std::size_t>(T[idx][2])];
-    Vec3 V1 = b - a;
-    Vec3 V2 = c - a;
-    Vec3 nv = cross(V1, V2);
-    nv = nv / norm(nv);
-    if (dot(nv, normal[idx]) < 0.0) {
-      nv = nv * -1.0;
-    }
-    NV.push_back(nv);
+// Orient ONE face by the analytic torus normal `nrm` (the compute_NV_toroidal
+// loop body, fused into the per-face normal computation at both call sites so
+// the intermediate per-face `normal` array is never materialized; every float
+// expression and its evaluation order are unchanged).
+inline Vec3 orient_face_toroidal(const std::array<int, 3>& tri,
+                                 const std::vector<Vec3>& P, const Vec3& nrm) {
+  const Vec3& a = P[static_cast<std::size_t>(tri[0])];
+  const Vec3& b = P[static_cast<std::size_t>(tri[1])];
+  const Vec3& c = P[static_cast<std::size_t>(tri[2])];
+  Vec3 V1 = b - a;
+  Vec3 V2 = c - a;
+  Vec3 nv = cross(V1, V2);
+  nv = nv / norm(nv);
+  if (dot(nv, nrm) < 0.0) {
+    nv = nv * -1.0;
   }
-  return NV;
+  return nv;
 }
 
 // ---------------------------------------------------------------------------
@@ -167,6 +162,7 @@ LocalMesh mesh_toroide(const Vec3& ci, const Vec3& cj, double ri,
   }
 
   std::vector<std::array<int, 3>> T;
+  T.reserve(static_cast<std::size_t>(2) * N_probe * N_arc);  // exact face count
   for (int i = 1; i <= N_probe; ++i) {
     for (int j = 1; j <= N_arc; ++j) {
       T.push_back(index_P_toroide(i - 1, j, i, j - 1, i, j, N_arc));
@@ -174,9 +170,10 @@ LocalMesh mesh_toroide(const Vec3& ci, const Vec3& cj, double ri,
     }
   }
 
-  // analytic torus normal at each face centroid
-  std::vector<Vec3> normal;
-  normal.reserve(T.size());
+  // analytic torus normal at each face centroid, fused with the face orientation
+  // (identical per-face expressions; the intermediate array is gone)
+  std::vector<Vec3> NV;
+  NV.reserve(T.size());
   for (const auto& tri : T) {
     Vec3 p = (P[static_cast<std::size_t>(tri[0])] +
               P[static_cast<std::size_t>(tri[1])] +
@@ -184,10 +181,8 @@ LocalMesh mesh_toroide(const Vec3& ci, const Vec3& cj, double ri,
              3.0;
     Vec3 nt = (p - A) - dot(p - A, n) * n;
     Vec3 xp = A + r * nt / norm(nt);
-    normal.push_back((xp - p) / norm(xp - p));
+    NV.push_back(orient_face_toroidal(tri, P, (xp - p) / norm(xp - p)));
   }
-
-  std::vector<Vec3> NV = compute_NV_toroidal(T, P, normal);
 
   // ID-fusion tags: row i=0 lies on atom_i's sphere, row i=N_probe on atom_j;
   // column j=0 is the probe arc at endpoint e1, j=N_arc at e2. A dual-tagged
@@ -268,6 +263,7 @@ LocalMesh mesh_cusp(const Vec3& /*c1*/, double /*r1*/,
   // ID-fusion tags aligned with P[1:]; tagged==false -> no tagging. A vertex on
   // both the atom rim and a probe/seam meridian carries the FULL Python tag list.
   std::vector<TagList> vids;
+  vids.reserve(static_cast<std::size_t>(N_point));  // capacity hint only
   bool full_circle = angle >= TWO_PI - 1e-9;
 
   for (int i = 0; i <= N_probe; ++i) {
@@ -301,6 +297,13 @@ LocalMesh mesh_cusp(const Vec3& /*c1*/, double /*r1*/,
   }
 
   std::vector<std::array<int, 3>> T;
+  {
+    // Exact face count: rows i < N_probe emit 2 triangles per j, the last row 1.
+    long long nt = 0;
+    for (int i = 1; i <= N_probe; ++i)
+      nt += (i < N_probe ? 2 : 1) * t[static_cast<std::size_t>(i + 1)] * N_arc;
+    T.reserve(static_cast<std::size_t>(nt));
+  }
   for (int i = 1; i <= N_probe; ++i) {
     long long tip1 = t[static_cast<std::size_t>(i + 1)];
     long long ti = t[static_cast<std::size_t>(i)];
@@ -342,9 +345,10 @@ LocalMesh mesh_cusp(const Vec3& /*c1*/, double /*r1*/,
     }
   }
 
-  // analytic torus normal at each face centroid
-  std::vector<Vec3> normal;
-  normal.reserve(T.size());
+  // analytic torus normal at each face centroid, fused with the face orientation
+  // (identical per-face expressions; the intermediate array is gone)
+  std::vector<Vec3> NV;
+  NV.reserve(T.size());
   for (const auto& tri : T) {
     Vec3 p = (P[static_cast<std::size_t>(tri[0])] +
               P[static_cast<std::size_t>(tri[1])] +
@@ -352,10 +356,8 @@ LocalMesh mesh_cusp(const Vec3& /*c1*/, double /*r1*/,
              3.0;
     Vec3 nt = (p - A) - (dot(p - A, n) / norm(n)) * n / norm(n);
     Vec3 xp = A + r * nt / norm(nt);
-    normal.push_back((xp - p) / norm(xp - p));
+    NV.push_back(orient_face_toroidal(tri, P, (xp - p) / norm(xp - p)));
   }
-
-  std::vector<Vec3> NV = compute_NV_toroidal(T, P, normal);
   // The whole cusp sheet lies on its single rim atom: attribute every vertex to
   // atom_rim. Aligned with P[1..Np]; never affects V/F/N.
   std::vector<int32_t> vatom(static_cast<std::size_t>(Np), atom_rim);
@@ -494,14 +496,28 @@ void data_SEStorpat(MeshState& state, const Geom& geom, const DataI& di,
   });
 
   // --- SERIAL ordered merge (segments ascending, then circles ascending) -
+  // Pre-sum the emitted sizes so the accumulator reserves once (capacity-only),
+  // and move the per-vertex tag lists out of the dead LocalMesh.
+  std::size_t add_v = 0, add_f = 0;
+  auto count_lm = [&](const std::array<LocalMesh, 2>& pair) {
+    for (const LocalMesh& lm : pair) {
+      if (lm.emit) {
+        add_v += lm.P.empty() ? 0 : lm.P.size() - 1;
+        add_f += lm.T.size();
+      }
+    }
+  };
+  for (int i = 1; i <= nsegment; ++i) count_lm(seg_lm[static_cast<std::size_t>(i)]);
+  for (int i = 1; i <= ncircle; ++i) count_lm(crc_lm[static_cast<std::size_t>(i)]);
+  state.reserve_extra(add_v, add_f);
   for (int i = 1; i <= nsegment; ++i) {
-    for (const LocalMesh& lm : seg_lm[static_cast<std::size_t>(i)]) {
-      if (lm.emit) state.add_patch(lm.P, lm.T, lm.NV, lm.vids, lm.vatom);
+    for (LocalMesh& lm : seg_lm[static_cast<std::size_t>(i)]) {
+      if (lm.emit) state.add_patch(lm.P, lm.T, lm.NV, std::move(lm.vids), lm.vatom);
     }
   }
   for (int i = 1; i <= ncircle; ++i) {
-    for (const LocalMesh& lm : crc_lm[static_cast<std::size_t>(i)]) {
-      if (lm.emit) state.add_patch(lm.P, lm.T, lm.NV, lm.vids, lm.vatom);
+    for (LocalMesh& lm : crc_lm[static_cast<std::size_t>(i)]) {
+      if (lm.emit) state.add_patch(lm.P, lm.T, lm.NV, std::move(lm.vids), lm.vatom);
     }
   }
 }

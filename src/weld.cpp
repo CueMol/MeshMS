@@ -7,7 +7,9 @@
 #include "meshms/weld.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <unordered_map>
 #include <unordered_set>
@@ -87,7 +89,22 @@ WeldResult weld(const std::vector<Vec3>& V, const std::vector<Tri>& F, double to
   return out;
 }
 
-BoundaryLoopsResult boundary_loops(const std::vector<Vec3>& V, const std::vector<Tri>& F) {
+namespace {
+
+// Element adapters so the facade-layout overload (capi MeshResult arrays) runs
+// the identical loop without a whole-mesh Vec3/Tri conversion.
+inline Vec3 blv_get(const std::vector<Vec3>& V, std::size_t i) { return V[i]; }
+inline Vec3 blv_get(const std::vector<std::array<double, 3>>& V, std::size_t i) {
+  return Vec3{V[i][0], V[i][1], V[i][2]};
+}
+inline int bli_get(const Tri& f, int k) { return f[static_cast<std::size_t>(k)]; }
+inline int bli_get(const std::array<std::uint32_t, 3>& f, int k) {
+  return static_cast<int>(f[static_cast<std::size_t>(k)]);
+}
+
+template <class VT, class FT>
+BoundaryLoopsResult boundary_loops_impl(const std::vector<VT>& V,
+                                        const std::vector<FT>& F) {
   BoundaryLoopsResult res;
 
   // Insertion-ordered undirected edge counts (key -> count), keyed by first-seen.
@@ -95,8 +112,8 @@ BoundaryLoopsResult boundary_loops(const std::vector<Vec3>& V, const std::vector
   std::vector<int> edge_cnt;
   std::unordered_map<std::pair<int, int>, int, EdgeHash> edge_idx;
   edge_idx.reserve(F.size() * 6 + 1);
-  for (const Tri& f : F) {
-    const int a = f[0], b = f[1], c = f[2];
+  for (const FT& f : F) {
+    const int a = bli_get(f, 0), b = bli_get(f, 1), c = bli_get(f, 2);
     const std::pair<int, int> es[3] = {ekey(a, b), ekey(b, c), ekey(c, a)};
     for (const auto& e : es) {
       auto it = edge_idx.find(e);
@@ -189,7 +206,7 @@ BoundaryLoopsResult boundary_loops(const std::vector<Vec3>& V, const std::vector
     L.n_verts = static_cast<int>(members.size());
     L.n_edges = edges_per[cid];
     Vec3 sum{};
-    for (int x : members) sum = sum + V[static_cast<std::size_t>(x)];
+    for (int x : members) sum = sum + blv_get(V, static_cast<std::size_t>(x));
     L.centroid = sum / static_cast<double>(members.size());
     L.closed = closed;
     L.vids = members;
@@ -206,12 +223,25 @@ BoundaryLoopsResult boundary_loops(const std::vector<Vec3>& V, const std::vector
   return res;
 }
 
-FillResult fill_small_holes(const std::vector<Vec3>& V, const std::vector<Tri>& F,
+}  // namespace
+
+BoundaryLoopsResult boundary_loops(const std::vector<Vec3>& V, const std::vector<Tri>& F) {
+  return boundary_loops_impl(V, F);
+}
+
+BoundaryLoopsResult boundary_loops(const std::vector<std::array<double, 3>>& V,
+                                   const std::vector<std::array<std::uint32_t, 3>>& F) {
+  return boundary_loops_impl(V, F);
+}
+
+FillResult fill_small_holes(std::vector<Vec3> V, const std::vector<Tri>& F,
                             int max_loop) {
   FillResult out;
-  out.V = V;
   out.F = F;
-  if (F.empty()) return out;
+  if (F.empty()) {
+    out.V = std::move(V);
+    return out;
+  }
 
   // undirected boundary edges + the (unnormalised) normal of each edge's adjacent
   // face (last writer wins, like the Python dict assignment).
@@ -241,7 +271,10 @@ FillResult fill_small_holes(const std::vector<Vec3>& V, const std::vector<Tri>& 
   for (std::size_t i = 0; i < edge_order.size(); ++i) {
     if (edge_cnt[i] == 1) boundary.insert(edge_order[i]);
   }
-  if (boundary.empty()) return out;
+  if (boundary.empty()) {
+    out.V = std::move(V);
+    return out;
+  }
 
   // undirected adjacency (for components / simple cycles), insertion-ordered;
   // Python uses list (NOT set) here -> duplicates allowed, so do not dedup.
@@ -410,13 +443,15 @@ FillResult fill_small_holes(const std::vector<Vec3>& V, const std::vector<Tri>& 
       }
     }
   }
+  out.V = std::move(V);
   return out;
 }
 
-FlapResult remove_nonmanifold_flaps(const std::vector<Vec3>& V, const std::vector<Tri>& F,
+FlapResult remove_nonmanifold_flaps(std::vector<Vec3> V, const std::vector<Tri>& F,
                                     int passes, std::vector<std::uint32_t>* kept_orig) {
   FlapResult out;
-  out.V = V;
+  // V is purely topological here: moved straight through to the result.
+  out.V = std::move(V);
   std::vector<Tri> cur = F;
   // Original-face indices carried alongside `cur` so a parallel per-face array can
   // be filtered to the survivors. Identity until a pass actually drops faces.

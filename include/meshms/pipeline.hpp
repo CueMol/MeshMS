@@ -22,6 +22,7 @@
 #include <string>
 #include <vector>
 
+#include "meshms/concave.hpp"
 #include "meshms/exterior.hpp"
 #include "meshms/geom.hpp"
 #include "meshms/intersection.hpp"
@@ -70,6 +71,9 @@ struct RSComponents {
   DataLoop dl;
   DataPat dp;
   Ext ext;
+  // Density-independent concave probe decomposition (the expensive half of
+  // SESconcavepat): computed once here so build_mesh() only re-meshes it.
+  ConcaveDecomp concave;
 };
 
 // Compute the density-independent RS components for `geom` at probe radius

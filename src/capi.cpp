@@ -137,7 +137,7 @@ MeshResult build_surface_from_array(
 
 MeshResult close_cusps(const MeshResult& mesh, double weld_tol) {
   WeldResult w = weld(to_vec3(mesh.verts), to_tri(mesh.faces), weld_tol);
-  FillResult fh = fill_small_holes(w.V, w.F);
+  FillResult fh = fill_small_holes(std::move(w.V), w.F);  // w.V dead after this
   MeshResult r;
   r.verts = from_vec3(fh.V);
   r.faces = from_tri(fh.F);
@@ -170,7 +170,8 @@ std::vector<std::array<double, 3>> vertex_normals(
 }
 
 MeshReport analyze_mesh(const MeshResult& mesh) {
-  ManifoldReport rep = manifold_report(to_vec3(mesh.verts), to_tri(mesh.faces));
+  // Facade-layout overload: no whole-mesh Vec3/Tri conversion copies.
+  ManifoldReport rep = manifold_report(mesh.verts, mesh.faces);
   MeshReport out;
   out.n_vertices = static_cast<std::uint32_t>(rep.n_vertices);
   out.n_faces = static_cast<std::uint32_t>(rep.n_faces);
@@ -185,7 +186,8 @@ MeshReport analyze_mesh(const MeshResult& mesh) {
 }
 
 BoundaryDiagnostics boundary_diagnostics(const MeshResult& mesh) {
-  BoundaryLoopsResult res = boundary_loops(to_vec3(mesh.verts), to_tri(mesh.faces));
+  // Facade-layout overload: no whole-mesh Vec3/Tri conversion copies.
+  BoundaryLoopsResult res = boundary_loops(mesh.verts, mesh.faces);
   BoundaryDiagnostics out;
   out.loops.reserve(res.loops.size());
   for (const BoundaryLoop& L : res.loops) {

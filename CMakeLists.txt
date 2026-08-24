@@ -28,6 +28,7 @@ else()
 endif()
 option(MESHMS_BUILD_TESTS "Build the C++ port unit/golden tests" ${MESHMS_IS_TOP_LEVEL})
 option(MESHMS_BUILD_CLI   "Build the MeshMS CLI" ${MESHMS_IS_TOP_LEVEL})
+option(MESHMS_BUILD_TOOLS "Build the bench/converter tools" ${MESHMS_IS_TOP_LEVEL})
 
 # No-FMA-contraction is MANDATORY for the ULP-sensitive SAS golden gate: a fused
 # a*b+c changes the last-bit rounding and breaks the bit-for-bit 1e-9 topology
@@ -95,6 +96,14 @@ endif()
 if(MESHMS_BUILD_CLI AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/src/cli/main.cpp)
   add_executable(meshms_cli ${CMAKE_CURRENT_SOURCE_DIR}/src/cli/main.cpp)
   target_link_libraries(meshms_cli PRIVATE MeshMS)
+endif()
+
+# --- tools: per-stage benchmark + xyz/PDB -> xyzr converter -------------------
+# Not installed; for local measurement work (see OPTIMIZATION.md).
+if(MESHMS_BUILD_TOOLS)
+  add_executable(meshms_bench ${CMAKE_CURRENT_SOURCE_DIR}/tools/bench.cpp)
+  target_link_libraries(meshms_bench PRIVATE MeshMS)
+  add_executable(meshms_mol2xyzr ${CMAKE_CURRENT_SOURCE_DIR}/tools/mol2xyzr.cpp)
 endif()
 
 # --- tests: one executable per tests/test_*.cpp, registered with CTest --------

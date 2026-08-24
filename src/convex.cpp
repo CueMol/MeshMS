@@ -224,13 +224,23 @@ void data_SESsphpat_convex(MeshState& state, const Geom& geom, const DataI& di,
     const int pend = dp.patches_index[static_cast<std::size_t>(i)][1];
     const int npatches_i = pend - pstart + 1;
 
-    // --- THREAD-LOCAL segment0 / Rj (one per atom; no shared write) --------
+    // --- THREAD-LOCAL persistent segment0 / Rj (no shared write) -----------
     // segment0 : (nsegment+1)x12 record matrix, rebuilt for atom i's segments.
-    std::vector<std::array<double, 12>> segment0(static_cast<std::size_t>(nsegment) + 1,
-                                                 std::array<double, 12>{});
-    // Rj (size nsegment+1, init 0): written by mod_seg_loop_cir, read by
-    // mesh_sphpat for the convex near-cusp arc refinement.
-    std::vector<double> Rj(static_cast<std::size_t>(nsegment) + 1, 0.0);
+    // Rj (size nsegment+1): written by mod_seg_loop_cir, read by mesh_sphpat
+    // for the convex near-cusp arc refinement.
+    // These were allocated + zero-filled fresh per atom: O(M x nsegment) heap
+    // traffic per build for an O(nsatom_i) write set. They are now PERSISTENT
+    // thread_local buffers grown once per thread. No clearing between atoms is
+    // needed: mod_seg_loop_cir writes EVERY satom[i] row unconditionally, and
+    // the only rows ever read (loop entries, always atom i's own segments) are
+    // exactly those rows -- a stale row from a previous atom is never read.
+    thread_local std::vector<std::array<double, 12>> segment0;
+    thread_local std::vector<double> Rj;
+    if (segment0.size() < static_cast<std::size_t>(nsegment) + 1) {
+      segment0.resize(static_cast<std::size_t>(nsegment) + 1,
+                      std::array<double, 12>{});
+      Rj.resize(static_cast<std::size_t>(nsegment) + 1, 0.0);
+    }
 
     // --- rebuild loops_i0 / segment0 / circle0 and write Rj ----------------
     ModOut mo = mod_seg_loop_cir(i, nloops_i, loops_i, loopsize_i, geom, di, dc,
@@ -276,9 +286,21 @@ void data_SESsphpat_convex(MeshState& state, const Geom& geom, const DataI& di,
   });
 
   // --- SERIAL ordered merge (atom ascending, then patch ascending) -------
+  // Pre-sum the emitted sizes so the accumulator reserves once (capacity-only),
+  // and move the per-vertex tag lists out of the dead LocalMesh.
+  std::size_t add_v = 0, add_f = 0;
   for (int i = 1; i <= M; ++i) {
     for (const LocalMesh& lm : atom_lm[static_cast<std::size_t>(i)]) {
-      if (lm.emit) state.add_patch(lm.P, lm.T, lm.NV, lm.vids, lm.vatom);
+      if (lm.emit) {
+        add_v += lm.P.empty() ? 0 : lm.P.size() - 1;
+        add_f += lm.T.size();
+      }
+    }
+  }
+  state.reserve_extra(add_v, add_f);
+  for (int i = 1; i <= M; ++i) {
+    for (LocalMesh& lm : atom_lm[static_cast<std::size_t>(i)]) {
+      if (lm.emit) state.add_patch(lm.P, lm.T, lm.NV, std::move(lm.vids), lm.vatom);
     }
   }
 }

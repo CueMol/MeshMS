@@ -11,6 +11,7 @@
 //
 // manifold_report is ALREADY ported in mesh_check.hpp (different dict keys); it is
 // NOT duplicated here. Indexing here is the 0-based PLY/mesh convention.
+#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -58,16 +59,24 @@ struct BoundaryLoopsResult {
 };
 BoundaryLoopsResult boundary_loops(const std::vector<Vec3>& V, const std::vector<Tri>& F);
 
+// Facade-layout overload: identical result over the capi MeshResult arrays
+// (x,y,z triples and 0-based uint32 index triples) without converting the whole
+// mesh to Vec3/Tri first.
+BoundaryLoopsResult boundary_loops(const std::vector<std::array<double, 3>>& V,
+                                   const std::vector<std::array<std::uint32_t, 3>>& F);
+
 // fill_small_holes(V, F, max_loop): follow boundary edges as directed half-edges
 // into closed cycles and fan-triangulate every cycle of at most max_loop edges,
 // orienting each new triangle to agree with the adjacent-face normal average.
 // Larger genuine boundaries are left untouched. V is returned unchanged; only F
-// gains the fill triangles (appended after the original faces).
+// gains the fill triangles (appended after the original faces). V is taken by
+// value and moved into the result, so a caller that is done with its copy can
+// std::move it in and skip the vertex-array copy entirely.
 struct FillResult {
   std::vector<Vec3> V;
   std::vector<Tri> F;
 };
-FillResult fill_small_holes(const std::vector<Vec3>& V, const std::vector<Tri>& F,
+FillResult fill_small_holes(std::vector<Vec3> V, const std::vector<Tri>& F,
                             int max_loop = 12);
 
 // remove_nonmanifold_flaps(V, F, passes): topological flap removal. On a
@@ -79,12 +88,13 @@ FillResult fill_small_holes(const std::vector<Vec3>& V, const std::vector<Tri>& 
 // kept_orig (optional): when non-null, receives the original index (into F) of
 // every surviving face, aligned with the returned F, so the caller can filter a
 // parallel per-face array (e.g. SES face type). Pure output add-on; F is unchanged
-// whether or not it is passed.
+// whether or not it is passed. V is never read (the removal is topological) and
+// is taken by value and moved into the result, so a caller can std::move it in.
 struct FlapResult {
   std::vector<Vec3> V;
   std::vector<Tri> F;
 };
-FlapResult remove_nonmanifold_flaps(const std::vector<Vec3>& V, const std::vector<Tri>& F,
+FlapResult remove_nonmanifold_flaps(std::vector<Vec3> V, const std::vector<Tri>& F,
                                     int passes = 4,
                                     std::vector<std::uint32_t>* kept_orig = nullptr);
 
