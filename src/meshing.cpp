@@ -9,7 +9,9 @@
 #include "meshms/meshing.hpp"
 
 #include <cmath>
+#include <deque>
 
+#include "meshms/parallel.hpp"
 #include "meshms/vec3.hpp"
 
 namespace meshms {
@@ -18,6 +20,56 @@ namespace {
 
 using Edge = std::array<int, 2>;        // [tail, head], 1-based
 using AeList = std::vector<Edge>;       // 1-based list, Ae[0] dummy
+
+// ---------------------------------------------------------------------------
+// FrontRing: the advancing front as a 1-based ring buffer. E(m), m in 1..n,
+// lives at buf[(head + m - 1) & mask]. The per-triangle front rewrites
+// (addnewpoint, both collapse_neighbor cases) are head/tail moves plus appends
+// -- O(1) instead of rebuilding the whole front, which cost O(Nae) copies and a
+// reallocation ladder per triangle (O(Nt x Nae) overall). Split and merge
+// (collapse_nonneighbor{1,2}) still copy O(Nae) rows, but once per split rather
+// than once per triangle. The logical row order m = 1..n is exactly the old
+// AeList order, so every predicate and tie-break sees the same sequence.
+// ---------------------------------------------------------------------------
+struct FrontRing {
+  std::vector<Edge> buf;  // capacity is always a power of two (empty until used)
+  std::size_t head = 0;
+  int n = 0;  // the live row count (the old Nae)
+
+  std::size_t mask() const { return buf.size() - 1; }
+  Edge& at(int m) {
+    return buf[(head + static_cast<std::size_t>(m) - 1) & mask()];
+  }
+  const Edge& at(int m) const {
+    return buf[(head + static_cast<std::size_t>(m) - 1) & mask()];
+  }
+  void clear() {
+    head = 0;
+    n = 0;
+  }
+  void push_back(const Edge& e) {
+    if (buf.empty()) {
+      buf.resize(64);  // lazy: pool slots for depths never reached stay free
+    } else if (static_cast<std::size_t>(n) == buf.size()) {
+      grow();
+    }
+    buf[(head + static_cast<std::size_t>(n)) & mask()] = e;
+    ++n;
+  }
+  void pop_front() {
+    head = (head + 1) & mask();
+    --n;
+  }
+  void pop_back() { --n; }
+
+ private:
+  void grow() {
+    std::vector<Edge> nb(buf.size() * 2);
+    for (int m = 1; m <= n; ++m) nb[static_cast<std::size_t>(m - 1)] = at(m);
+    buf = std::move(nb);
+    head = 0;
+  }
+};
 using Tri3 = std::array<int, 3>;        // 1-based [a,b,c]
 
 // ---------------------------------------------------------------------------
@@ -30,7 +82,32 @@ struct Ctx {
   double rj = 0.0;
   const std::vector<double>* Rj = nullptr;  // GLOBAL segment index -> neighbour VdW radius
   int depth = 0;                            // advancing-front recursion depth
+  // Shared grow-only Dist scratch for sweep 2. Safe across the recursion: every
+  // recursive call site breaks out of the while loop immediately after, so a
+  // parent frame never reads Dist again once a child may have overwritten it,
+  // and each iteration fully rewrites Dist[1..Nae] before any read.
+  std::vector<double> dist;
+  // The patch's main front, a scratch ring for building the inactive fronts,
+  // and per-recursion-depth spare rings for the collapse_nonneighbor splits
+  // (Ae1 stays alive across the first recursive call and Ae2 across both, so
+  // they cannot share one slot; the depth is unique per live frame, which makes
+  // ring_pool[depth] collision-free). All grow-only, so front (re)builds stop
+  // allocating in the steady state.
+  FrontRing root;
+  FrontRing scratch;
+  // deque, NOT vector: a deeper frame growing the pool appends new slots, and a
+  // deque keeps references to existing elements valid -- the parent frames hold
+  // live references (including their own Ae) into earlier slots.
+  std::deque<std::array<FrontRing, 2>> ring_pool;
 };
+
+// Fetch the depth-indexed spare-ring pair for the current live frame.
+inline std::array<FrontRing, 2>& split_rings(Ctx& ctx) {
+  while (ctx.ring_pool.size() <= static_cast<std::size_t>(ctx.depth)) {
+    ctx.ring_pool.emplace_back();
+  }
+  return ctx.ring_pool[static_cast<std::size_t>(ctx.depth)];
+}
 
 // The frame loop is already bounded -- `while (k <= N)` increments k on every
 // iteration -- so the only unbounded path through the mesher is the mutual
@@ -52,20 +129,6 @@ struct FrontDepthGuard {
   FrontDepthGuard(const FrontDepthGuard&) = delete;
   FrontDepthGuard& operator=(const FrontDepthGuard&) = delete;
 };
-
-// ---------------------------------------------------------------------------
-// Helpers for the 1-based Ae list.
-// ---------------------------------------------------------------------------
-// An empty 1-based Ae list (only the dummy slot).
-AeList new_ae() { return AeList(1); }
-
-// Build a fresh 1-based Ae list from a [first,last) range of [tail,head] rows.
-AeList ae_from_rows(const AeList& src, int lo, int hi) {
-  // src[lo..hi] inclusive (1-based, may be empty if lo > hi).
-  AeList out(1);
-  for (int k = lo; k <= hi; ++k) out.push_back(src[static_cast<std::size_t>(k)]);
-  return out;
-}
 
 // ---------------------------------------------------------------------------
 // small geometric helpers (port of the local functions in
@@ -147,7 +210,7 @@ Vec3 map_sphere(const Vec3& c_sphere, double r_sphere, const Vec3& p, double Rp)
 // Divide an arc into several points / edges (arc_division.m). c centre, r radius,
 // P1/P2 start/end, angle from P1 to P2 (clockwise), n points to k1.
 void arc_division(const Vec3& c, double r, const Vec3& P1, const Vec3& P2,
-                  double angle, const Vec3& n, AeList& Ae, int& Nae,
+                  double angle, const Vec3& n, FrontRing& Ae,
                   std::vector<Vec3>& P, int& Np, double r_sphere, int flag,
                   double d, double Rp, Ctx& ctx) {
   double theta0 = std::numbers::pi / 3;  // maximum angle change
@@ -167,27 +230,24 @@ void arc_division(const Vec3& c, double r, const Vec3& P1, const Vec3& P2,
 
   int Ndiv = static_cast<int>(N_division);
 
-  Vec3 u = (P1 - c) / r;
-  Vec3 v{n.y * u.z - n.z * u.y, n.z * u.x - n.x * u.z, n.x * u.y - n.y * u.x};
-
-  std::vector<Vec3> points;
-  std::vector<Edge> edges;
-  for (int j = 0; j < Ndiv; ++j) {
-    double angle_j = static_cast<double>(j) / Ndiv * angle;
-    Vec3 P_j = r * std::cos(angle_j) * u + r * std::sin(angle_j) * v + c;
-    points.push_back(P_j);
-    edges.push_back(Edge{Np + j + 1, Np + j + 2});
-  }
-
+  // The degenerate-arc early return depends only on Ndiv, the endpoints and the
+  // angle -- not on the generated points -- so test it BEFORE generating and push
+  // straight into P/Ae. Same values in the same order; the per-arc points/edges
+  // scratch vectors (two heap allocations per arc segment) disappear.
   if (Ndiv == 1 && norm(P2 - P1) < 1e-10 && angle < 0.1) {
     return;
   }
 
-  for (const Vec3& pt : points) P.push_back(pt);
-  Np = Np + Ndiv;
+  Vec3 u = (P1 - c) / r;
+  Vec3 v{n.y * u.z - n.z * u.y, n.z * u.x - n.x * u.z, n.x * u.y - n.y * u.x};
 
-  for (const Edge& e : edges) Ae.push_back(e);
-  Nae = Nae + Ndiv;
+  for (int j = 0; j < Ndiv; ++j) {
+    double angle_j = static_cast<double>(j) / Ndiv * angle;
+    Vec3 P_j = r * std::cos(angle_j) * u + r * std::sin(angle_j) * v + c;
+    P.push_back(P_j);
+    Ae.push_back(Edge{Np + j + 1, Np + j + 2});  // ring push tracks the count
+  }
+  Np = Np + Ndiv;
 }
 
 // Divide a loop into several edges (loop_division.m). loop[1..loopsize] are
@@ -195,10 +255,9 @@ void arc_division(const Vec3& c, double r, const Vec3& P1, const Vec3& P2,
 void loop_division(const Vec3& c_sphere, double r_sphere, const Loop& loop,
                    int loopsize,
                    const std::vector<std::array<double, 12>>& segment0,
-                   AeList& Ae, int& Nae, std::vector<Vec3>& P, int& Np, double d,
+                   FrontRing& Ae, std::vector<Vec3>& P, int& Np, double d,
                    double Rp, Ctx& ctx) {
-  Ae = new_ae();
-  Nae = 0;
+  Ae.clear();
   int Np0 = Np;
 
   for (int i = 1; i <= loopsize; ++i) {
@@ -227,22 +286,21 @@ void loop_division(const Vec3& c_sphere, double r_sphere, const Loop& loop,
       P1 = c_sphere + (P1 - c_sphere) * (r_sphere - Rp) / r_sphere;
     }
 
-    arc_division(c, r, P1, P2, angle, n, Ae, Nae, P, Np, r_sphere, flag, d, Rp, ctx);
+    arc_division(c, r, P1, P2, angle, n, Ae, P, Np, r_sphere, flag, d, Rp, ctx);
   }
 
-  if (Nae == 0) return;
+  if (Ae.n == 0) return;
 
   // close the loop: last edge head wraps to the first added point.
-  Ae[static_cast<std::size_t>(Nae)][1] = Np0 + 1;
+  Ae.at(Ae.n)[1] = Np0 + 1;
 }
 
 // Divide a full circle into edges (circle_division.m). circle is the 1-based row
 // [_, c(3), n(3), r, torusR].
 void circle_division(const Vec3& c_sphere, double r_sphere,
-                     const std::array<double, 9>& circle, AeList& Ae, int& Nae,
+                     const std::array<double, 9>& circle, FrontRing& Ae,
                      std::vector<Vec3>& P, int& Np, double d, double Rp, Ctx& ctx) {
-  Ae = new_ae();
-  Nae = 0;
+  Ae.clear();
 
   Vec3 c{circle[1], circle[2], circle[3]};
   Vec3 n{circle[4], circle[5], circle[6]};
@@ -269,45 +327,43 @@ void circle_division(const Vec3& c_sphere, double r_sphere,
   }
 
   int Np0 = Np;
-  arc_division(c, r, P1, P1, TWO_PI, n, Ae, Nae, P, Np, r_sphere, flag, d, Rp, ctx);
+  arc_division(c, r, P1, P1, TWO_PI, n, Ae, P, Np, r_sphere, flag, d, Rp, ctx);
 
   // modify the active edge set: close the circle.
-  Ae[static_cast<std::size_t>(Nae)][1] = Np0 + 1;
+  Ae.at(Ae.n)[1] = Np0 + 1;
 }
 
 // ---------------------------------------------------------------------------
 // forward decls for the recursion.
 // ---------------------------------------------------------------------------
 void advancing_front_approach(const Vec3& c_sphere, double r_sphere, int N,
-                              std::vector<Tri3>& T, int& Nt, AeList& Ae, int& Nae,
+                              std::vector<Tri3>& T, int& Nt, FrontRing& Ae,
                               std::vector<Vec3>& P, int& Np, double d,
                               double tolerance, double Rp, Ctx& ctx);
 
 void collapse_neighbor_sphere(int index_case, const Vec3& c_sphere,
                               double r_sphere, std::vector<Tri3>& T, int& Nt,
-                              AeList& Ae, int& Nae, std::vector<Vec3>& P, int& Np,
+                              FrontRing& Ae, std::vector<Vec3>& P, int& Np,
                               double tolerance, double Rp);
 
 void collapse_nonneighbor1_sphere(int index_np, const Vec3& c_sphere,
                                   double r_sphere, int N, std::vector<Tri3>& T,
-                                  int& Nt, AeList& Ae, int& Nae,
+                                  int& Nt, FrontRing& Ae,
                                   std::vector<Vec3>& P, int& Np, double d,
                                   double tolerance, double Rp, Ctx& ctx);
 
 void collapse_nonneighbor2_sphere(int index_np, const Vec3& c_sphere,
                                   double r_sphere, int N, int index_nactive,
-                                  std::vector<Tri3>& T, int& Nt, AeList& Ae,
-                                  int& Nae, std::vector<Vec3>& P, int& Np,
+                                  std::vector<Tri3>& T, int& Nt, FrontRing& Ae, std::vector<Vec3>& P, int& Np,
                                   double d, double tolerance, double Rp, Ctx& ctx);
 
-void addnewpoint_sphere(const Vec3& x, std::vector<Tri3>& T, int& Nt, AeList& Ae,
-                        int& Nae, std::vector<Vec3>& P, int& Np);
+void addnewpoint_sphere(const Vec3& x, std::vector<Tri3>& T, int& Nt, FrontRing& Ae, std::vector<Vec3>& P, int& Np);
 
 // ---------------------------------------------------------------------------
 // advancing front (advancing_front_approach.m).
 // ---------------------------------------------------------------------------
 void advancing_front_approach(const Vec3& c_sphere, double r_sphere, int N,
-                              std::vector<Tri3>& T, int& Nt, AeList& Ae, int& Nae,
+                              std::vector<Tri3>& T, int& Nt, FrontRing& Ae,
                               std::vector<Vec3>& P, int& Np, double d,
                               double tolerance, double Rp, Ctx& ctx) {
   const FrontDepthGuard depth_guard(ctx);
@@ -318,28 +374,26 @@ void advancing_front_approach(const Vec3& c_sphere, double r_sphere, int N,
   const double h = d * std::sqrt(3.0) / 2.0;
 
   auto Pt = [&](int idx) -> const Vec3& { return P[static_cast<std::size_t>(idx)]; };
-  auto E = [&](int idx) -> Edge& { return Ae[static_cast<std::size_t>(idx)]; };
+  int& Nae = Ae.n;
+  auto E = [&](int idx) -> Edge& { return Ae.at(idx); };
 
-  // One Dist scratch per afa frame, reused across while iterations (S3): it is
-  // re-assigned to Nae+1 and fully overwritten by the m=1..Nae fill before any
-  // read each iteration, so contents are identical -- only allocations drop.
-  std::vector<double> Dist;
+  // Dist lives in ctx (see Ctx::dist): one allocation per patch instead of one
+  // per afa frame, and grow-only so the reallocation count is O(log max Nae).
+  std::vector<double>& Dist = ctx.dist;
 
   int k = 1;
   while (k <= N) {
     k += 1;
 
     if (Nae < 3) {
-      Ae = new_ae();
-      Nae = 0;
+      Ae.clear();
       break;
     }
 
     if (Nae == 3) {  // the end condition
       T.push_back(Tri3{E(1)[0], E(1)[1], E(2)[1]});
       Nt = Nt + 1;
-      Nae = 0;
-      Ae = new_ae();
+      Ae.clear();
       break;
     }
 
@@ -432,19 +486,19 @@ void advancing_front_approach(const Vec3& c_sphere, double r_sphere, int N,
         if (index_nactive == 0) {
           if (index_np > 3 && index_np < Nae) {
             collapse_nonneighbor1_sphere(index_np, c_sphere, r_sphere, N, T, Nt,
-                                         Ae, Nae, P, Np, d, tolerance, Rp, ctx);
+                                         Ae, P, Np, d, tolerance, Rp, ctx);
             break;
           } else if (index_np == Nae) {
-            collapse_neighbor_sphere(1, c_sphere, r_sphere, T, Nt, Ae, Nae, P, Np,
+            collapse_neighbor_sphere(1, c_sphere, r_sphere, T, Nt, Ae, P, Np,
                                      tolerance, Rp);
           } else if (index_np == 3) {
-            collapse_neighbor_sphere(2, c_sphere, r_sphere, T, Nt, Ae, Nae, P, Np,
+            collapse_neighbor_sphere(2, c_sphere, r_sphere, T, Nt, Ae, P, Np,
                                      tolerance, Rp);
           }
           continue;
         } else if (index_nactive > 0) {
           collapse_nonneighbor2_sphere(index_np, c_sphere, r_sphere, N,
-                                       index_nactive, T, Nt, Ae, Nae, P, Np, d,
+                                       index_nactive, T, Nt, Ae, P, Np, d,
                                        tolerance, Rp, ctx);
           break;
         }
@@ -457,7 +511,11 @@ void advancing_front_approach(const Vec3& c_sphere, double r_sphere, int N,
       index_nactive = 0;
 
       PA1 = Pt(E(1)[0]);
-      Dist.assign(static_cast<std::size_t>(Nae) + 1, 0.0);  // Dist[0] dummy
+      // Grow-only: Dist[1..Nae] is fully overwritten below before any read and
+      // Dist[0] is never read, so the assign()'s zero-fill (an O(Nae) memset
+      // every iteration) was pure waste.
+      if (Dist.size() < static_cast<std::size_t>(Nae) + 1)
+        Dist.resize(static_cast<std::size_t>(Nae) + 1);
       for (int m = 1; m <= Nae; ++m) {
         Dist[static_cast<std::size_t>(m)] = norm(x - Pt(E(m)[0]));
       }
@@ -537,19 +595,19 @@ void advancing_front_approach(const Vec3& c_sphere, double r_sphere, int N,
         if (index_nactive == 0) {
           if (index_np > 3 && index_np < Nae) {
             collapse_nonneighbor1_sphere(index_np, c_sphere, r_sphere, N, T, Nt,
-                                         Ae, Nae, P, Np, d, tolerance, Rp, ctx);
+                                         Ae, P, Np, d, tolerance, Rp, ctx);
             break;
           } else if (index_np == Nae) {
-            collapse_neighbor_sphere(1, c_sphere, r_sphere, T, Nt, Ae, Nae, P, Np,
+            collapse_neighbor_sphere(1, c_sphere, r_sphere, T, Nt, Ae, P, Np,
                                      tolerance, Rp);
           } else if (index_np == 3) {
-            collapse_neighbor_sphere(2, c_sphere, r_sphere, T, Nt, Ae, Nae, P, Np,
+            collapse_neighbor_sphere(2, c_sphere, r_sphere, T, Nt, Ae, P, Np,
                                      tolerance, Rp);
           }
           continue;
         } else if (index_nactive > 0) {
           collapse_nonneighbor2_sphere(index_np, c_sphere, r_sphere, N,
-                                       index_nactive, T, Nt, Ae, Nae, P, Np, d,
+                                       index_nactive, T, Nt, Ae, P, Np, d,
                                        tolerance, Rp, ctx);
           break;
         }
@@ -564,10 +622,10 @@ void advancing_front_approach(const Vec3& c_sphere, double r_sphere, int N,
         double edgedist_2 =
             norm(Pt(E(2)[0]) - Pt(E(1)[0])) + norm(Pt(E(2)[0]) - Pt(E(1)[1]));
         if (edgedist_Nae < edgedist_2) {
-          collapse_neighbor_sphere(1, c_sphere, r_sphere, T, Nt, Ae, Nae, P, Np,
+          collapse_neighbor_sphere(1, c_sphere, r_sphere, T, Nt, Ae, P, Np,
                                    tolerance, Rp);
         } else {
-          collapse_neighbor_sphere(2, c_sphere, r_sphere, T, Nt, Ae, Nae, P, Np,
+          collapse_neighbor_sphere(2, c_sphere, r_sphere, T, Nt, Ae, P, Np,
                                    tolerance, Rp);
         }
         continue;
@@ -575,7 +633,7 @@ void advancing_front_approach(const Vec3& c_sphere, double r_sphere, int N,
         double angle1_2 = angle_vectors(Pt(E(Nae)[0]) - Pt(E(2)[0]),
                                         Pt(E(2)[1]) - Pt(E(2)[0]), n2);
         if (angle1_2 > angle2) {
-          collapse_neighbor_sphere(1, c_sphere, r_sphere, T, Nt, Ae, Nae, P, Np,
+          collapse_neighbor_sphere(1, c_sphere, r_sphere, T, Nt, Ae, P, Np,
                                    tolerance, Rp);
           continue;
         }
@@ -583,7 +641,7 @@ void advancing_front_approach(const Vec3& c_sphere, double r_sphere, int N,
         double angle1_1 = angle_vectors(Pt(E(Nae)[0]) - Pt(E(1)[0]),
                                         Pt(E(2)[1]) - Pt(E(1)[0]), n1);
         if (angle1_1 > angle1) {
-          collapse_neighbor_sphere(2, c_sphere, r_sphere, T, Nt, Ae, Nae, P, Np,
+          collapse_neighbor_sphere(2, c_sphere, r_sphere, T, Nt, Ae, P, Np,
                                    tolerance, Rp);
           continue;
         }
@@ -592,7 +650,7 @@ void advancing_front_approach(const Vec3& c_sphere, double r_sphere, int N,
       // ---------------------------------------------------------------
       // Add a new point
       // ---------------------------------------------------------------
-      addnewpoint_sphere(x, T, Nt, Ae, Nae, P, Np);
+      addnewpoint_sphere(x, T, Nt, Ae, P, Np);
     }
   }
 }
@@ -602,22 +660,22 @@ void advancing_front_approach(const Vec3& c_sphere, double r_sphere, int N,
 // ---------------------------------------------------------------------------
 void collapse_neighbor_sphere(int index_case, const Vec3& c_sphere,
                               double r_sphere, std::vector<Tri3>& T, int& Nt,
-                              AeList& Ae, int& Nae, std::vector<Vec3>& P, int& Np,
+                              FrontRing& Ae, std::vector<Vec3>& P, int& Np,
                               double tolerance, double Rp) {
   const double gamma = 1.8;  // controls edge length
   auto Pt = [&](int idx) -> const Vec3& { return P[static_cast<std::size_t>(idx)]; };
-  auto E = [&](int idx) -> Edge& { return Ae[static_cast<std::size_t>(idx)]; };
+  int& Nae = Ae.n;
+  auto E = [&](int idx) -> Edge& { return Ae.at(idx); };
 
   if (index_case == 1) {  // connect the left edge
     if (norm(Pt(E(Nae)[0]) - Pt(E(1)[1])) < gamma * tolerance) {
       T.push_back(Tri3{E(Nae)[0], E(1)[1], E(1)[0]});
       Nt = Nt + 1;
-      // Ae=[Ae(2:Nae-1,:);Ae(Nae,1),Ae(1,2)]
+      // Ae=[Ae(2:Nae-1,:);Ae(Nae,1),Ae(1,2)] -- drop edges 1 and Nae, append.
       Edge tail{E(Nae)[0], E(1)[1]};
-      AeList nw = ae_from_rows(Ae, 2, Nae - 1);
-      nw.push_back(tail);
-      Ae = std::move(nw);
-      Nae = Nae - 1;
+      Ae.pop_back();
+      Ae.pop_front();
+      Ae.push_back(tail);
     } else {
       Vec3 p = 0.5 * (Pt(E(Nae)[0]) + Pt(E(1)[1]));
       Vec3 x = map_sphere(c_sphere, r_sphere, p, Rp);
@@ -625,8 +683,7 @@ void collapse_neighbor_sphere(int index_case, const Vec3& c_sphere,
         T.push_back(Tri3{E(Nae)[0], E(3)[0], E(1)[0]});
         T.push_back(Tri3{E(3)[0], E(1)[1], E(1)[0]});
         Nt = Nt + 2;
-        Ae = new_ae();
-        Nae = 0;
+        Ae.clear();
       } else {
         P.push_back(x);
         Np = Np + 1;
@@ -635,23 +692,21 @@ void collapse_neighbor_sphere(int index_case, const Vec3& c_sphere,
         Nt = Nt + 2;
         Edge t1{E(Nae)[0], Np};
         Edge t2{Np, E(1)[1]};
-        AeList nw = ae_from_rows(Ae, 2, Nae - 1);
-        nw.push_back(t1);
-        nw.push_back(t2);
-        Ae = std::move(nw);
-        Nae = static_cast<int>(Ae.size()) - 1;
+        Ae.pop_back();
+        Ae.pop_front();
+        Ae.push_back(t1);
+        Ae.push_back(t2);
       }
     }
   } else {  // connect the right edge
     if (norm(Pt(E(1)[0]) - Pt(E(2)[1])) < gamma * tolerance) {
       T.push_back(Tri3{E(1)[0], E(2)[1], E(1)[1]});
       Nt = Nt + 1;
-      // Ae=[Ae(3:Nae,:);Ae(1,1),Ae(2,2)]
+      // Ae=[Ae(3:Nae,:);Ae(1,1),Ae(2,2)] -- drop edges 1 and 2, append.
       Edge tail{E(1)[0], E(2)[1]};
-      AeList nw = ae_from_rows(Ae, 3, Nae);
-      nw.push_back(tail);
-      Ae = std::move(nw);
-      Nae = Nae - 1;
+      Ae.pop_front();
+      Ae.pop_front();
+      Ae.push_back(tail);
     } else {
       Vec3 p = 0.5 * (Pt(E(1)[0]) + Pt(E(2)[1]));
       Vec3 x = map_sphere(c_sphere, r_sphere, p, Rp);
@@ -659,8 +714,7 @@ void collapse_neighbor_sphere(int index_case, const Vec3& c_sphere,
         T.push_back(Tri3{E(1)[0], E(Nae)[0], E(2)[0]});
         T.push_back(Tri3{E(Nae)[0], E(2)[1], E(2)[0]});
         Nt = Nt + 2;
-        Ae = new_ae();
-        Nae = 0;
+        Ae.clear();
       } else {
         P.push_back(x);
         Np = Np + 1;
@@ -669,11 +723,10 @@ void collapse_neighbor_sphere(int index_case, const Vec3& c_sphere,
         Nt = Nt + 2;
         Edge t1{E(1)[0], Np};
         Edge t2{Np, E(2)[1]};
-        AeList nw = ae_from_rows(Ae, 3, Nae);
-        nw.push_back(t1);
-        nw.push_back(t2);
-        Ae = std::move(nw);
-        Nae = static_cast<int>(Ae.size()) - 1;
+        Ae.pop_front();
+        Ae.pop_front();
+        Ae.push_back(t1);
+        Ae.push_back(t2);
       }
     }
   }
@@ -681,18 +734,20 @@ void collapse_neighbor_sphere(int index_case, const Vec3& c_sphere,
 
 void collapse_nonneighbor1_sphere(int index_np, const Vec3& c_sphere,
                                   double r_sphere, int N, std::vector<Tri3>& T,
-                                  int& Nt, AeList& Ae, int& Nae,
+                                  int& Nt, FrontRing& Ae,
                                   std::vector<Vec3>& P, int& Np, double d,
                                   double tolerance, double Rp, Ctx& ctx) {
   const double gamma = 1.8;
   int m = index_np;
   auto Pt = [&](int idx) -> const Vec3& { return P[static_cast<std::size_t>(idx)]; };
-  auto E = [&](int idx) -> Edge& { return Ae[static_cast<std::size_t>(idx)]; };
+  int& Nae = Ae.n;
+  auto E = [&](int idx) -> Edge& { return Ae.at(idx); };
 
-  AeList Ae1;
-  AeList Ae2;
-  int Nae1 = 0;
-  int Nae2 = 0;
+  std::array<FrontRing, 2>& spare = split_rings(ctx);
+  FrontRing& Ae1 = spare[0];
+  FrontRing& Ae2 = spare[1];
+  Ae1.clear();
+  Ae2.clear();
 
   double dm1 = norm(Pt(E(m)[0]) - Pt(E(1)[0]));
   double dm2 = norm(Pt(E(m)[0]) - Pt(E(1)[1]));
@@ -700,12 +755,10 @@ void collapse_nonneighbor1_sphere(int index_np, const Vec3& c_sphere,
   if (dm1 <= gamma * tolerance && dm2 <= gamma * tolerance) {
     T.push_back(Tri3{E(m)[0], E(1)[1], E(1)[0]});
     Nt = Nt + 1;
-    Ae1 = ae_from_rows(Ae, 2, m - 1);
-    Ae1.push_back(Edge{E(m)[0], E(1)[1]});
-    Nae1 = m - 1;
-    Ae2 = ae_from_rows(Ae, m, Nae);
-    Ae2.push_back(Edge{E(1)[0], E(m)[0]});
-    Nae2 = Nae - m + 2;
+    for (int kk = 2; kk <= m - 1; ++kk) Ae1.push_back(E(kk));
+    Ae1.push_back(Edge{E(m)[0], E(1)[1]});   // Nae1 = m - 1
+    for (int kk = m; kk <= Nae; ++kk) Ae2.push_back(E(kk));
+    Ae2.push_back(Edge{E(1)[0], E(m)[0]});   // Nae2 = Nae - m + 2
   } else if (dm1 > gamma * tolerance && dm2 > gamma * tolerance) {
     Vec3 p = 0.5 * (Pt(E(1)[0]) + Pt(E(m)[0]));
     Vec3 x = map_sphere(c_sphere, r_sphere, p, Rp);
@@ -728,15 +781,13 @@ void collapse_nonneighbor1_sphere(int index_np, const Vec3& c_sphere,
       Nt = Nt + 3;
     }
 
-    Ae1 = ae_from_rows(Ae, 2, m - 1);
+    for (int kk = 2; kk <= m - 1; ++kk) Ae1.push_back(E(kk));
     Ae1.push_back(Edge{E(m)[0], Np});
-    Ae1.push_back(Edge{Np, E(1)[1]});
-    Nae1 = m;
+    Ae1.push_back(Edge{Np, E(1)[1]});        // Nae1 = m
 
-    Ae2 = ae_from_rows(Ae, m, Nae);
+    for (int kk = m; kk <= Nae; ++kk) Ae2.push_back(E(kk));
     Ae2.push_back(Edge{E(1)[0], Np - 1});
-    Ae2.push_back(Edge{Np - 1, E(m)[0]});
-    Nae2 = Nae - m + 3;
+    Ae2.push_back(Edge{Np - 1, E(m)[0]});    // Nae2 = Nae - m + 3
   } else if (dm1 > gamma * tolerance) {
     Vec3 p = 0.5 * (Pt(E(1)[0]) + Pt(E(m)[0]));
     Vec3 x = map_sphere(c_sphere, r_sphere, p, Rp);
@@ -747,13 +798,11 @@ void collapse_nonneighbor1_sphere(int index_np, const Vec3& c_sphere,
     T.push_back(Tri3{Np, E(m)[0], E(1)[1]});
     Nt = Nt + 2;
 
-    Ae1 = ae_from_rows(Ae, 2, m - 1);
-    Ae1.push_back(Edge{E(m)[0], E(1)[1]});
-    Nae1 = m - 1;
-    Ae2 = ae_from_rows(Ae, m, Nae);
+    for (int kk = 2; kk <= m - 1; ++kk) Ae1.push_back(E(kk));
+    Ae1.push_back(Edge{E(m)[0], E(1)[1]});   // Nae1 = m - 1
+    for (int kk = m; kk <= Nae; ++kk) Ae2.push_back(E(kk));
     Ae2.push_back(Edge{E(1)[0], Np});
-    Ae2.push_back(Edge{Np, E(m)[0]});
-    Nae2 = Nae - m + 3;
+    Ae2.push_back(Edge{Np, E(m)[0]});        // Nae2 = Nae - m + 3
   } else if (dm2 > gamma * tolerance) {
     Vec3 p = 0.5 * (Pt(E(2)[0]) + Pt(E(m)[0]));
     Vec3 x = map_sphere(c_sphere, r_sphere, p, Rp);
@@ -764,33 +813,31 @@ void collapse_nonneighbor1_sphere(int index_np, const Vec3& c_sphere,
     T.push_back(Tri3{Np, E(2)[0], E(1)[0]});
     Nt = Nt + 2;
 
-    Ae1 = ae_from_rows(Ae, 2, m - 1);
+    for (int kk = 2; kk <= m - 1; ++kk) Ae1.push_back(E(kk));
     Ae1.push_back(Edge{E(m)[0], Np});
-    Ae1.push_back(Edge{Np, E(1)[1]});
-    Nae1 = m;
-    Ae2 = ae_from_rows(Ae, m, Nae);
-    Ae2.push_back(Edge{E(1)[0], E(m)[0]});
-    Nae2 = Nae - m + 2;
+    Ae1.push_back(Edge{Np, E(1)[1]});        // Nae1 = m
+    for (int kk = m; kk <= Nae; ++kk) Ae2.push_back(E(kk));
+    Ae2.push_back(Edge{E(1)[0], E(m)[0]});   // Nae2 = Nae - m + 2
   }
 
-  advancing_front_approach(c_sphere, r_sphere, N, T, Nt, Ae1, Nae1, P, Np, d,
+  advancing_front_approach(c_sphere, r_sphere, N, T, Nt, Ae1, P, Np, d,
                            tolerance, Rp, ctx);
-  advancing_front_approach(c_sphere, r_sphere, N, T, Nt, Ae2, Nae2, P, Np, d,
+  advancing_front_approach(c_sphere, r_sphere, N, T, Nt, Ae2, P, Np, d,
                            tolerance, Rp, ctx);
-  // mirror Python: Ae,Nae are rebound to the (post-second-call) values.
-  Ae = std::move(Ae2);
-  Nae = Nae2;
+  // mirror Python: Ae is rebound to the (post-second-call) front. swap rather
+  // than move, so the parent's old buffer stays in the pool slot for reuse.
+  std::swap(Ae, Ae2);
 }
 
 void collapse_nonneighbor2_sphere(int index_np, const Vec3& c_sphere,
                                   double r_sphere, int N, int index_nactive,
-                                  std::vector<Tri3>& T, int& Nt, AeList& Ae,
-                                  int& Nae, std::vector<Vec3>& P, int& Np,
+                                  std::vector<Tri3>& T, int& Nt, FrontRing& Ae, std::vector<Vec3>& P, int& Np,
                                   double d, double tolerance, double Rp, Ctx& ctx) {
   ctx.active[static_cast<std::size_t>(index_nactive)].meshed = 1;
   AeList& Ae0 = ctx.active[static_cast<std::size_t>(index_nactive)].Ae;
   int Nae0 = ctx.active[static_cast<std::size_t>(index_nactive)].Nae;
-  auto E = [&](int idx) -> Edge& { return Ae[static_cast<std::size_t>(idx)]; };
+  int& Nae = Ae.n;
+  auto E = [&](int idx) -> Edge& { return Ae.at(idx); };
   auto E0 = [&](int idx) -> Edge& { return Ae0[static_cast<std::size_t>(idx)]; };
 
   int m = index_np;
@@ -798,35 +845,34 @@ void collapse_nonneighbor2_sphere(int index_np, const Vec3& c_sphere,
   Nt = Nt + 1;
 
   // Ae1=[Ae(2:Nae,:); Ae(1,1),Ae0(m,1); Ae0(m:Nae0,:); Ae0(1:m-1,:); Ae0(m,1),Ae(1,2)]
-  AeList Ae1(1);
+  // Built in a depth-pool ring; the row count lands at Nae + Nae0 + 1 by
+  // construction.
+  FrontRing& Ae1 = split_rings(ctx)[0];
+  Ae1.clear();
   for (int kk = 2; kk <= Nae; ++kk) Ae1.push_back(E(kk));
   Ae1.push_back(Edge{E(1)[0], E0(m)[0]});
   for (int kk = m; kk <= Nae0; ++kk) Ae1.push_back(E0(kk));
   for (int kk = 1; kk <= m - 1; ++kk) Ae1.push_back(E0(kk));
   Ae1.push_back(Edge{E0(m)[0], E(1)[1]});
-  int Nae1 = Nae + Nae0 + 1;
 
-  advancing_front_approach(c_sphere, r_sphere, N, T, Nt, Ae1, Nae1, P, Np, d,
+  advancing_front_approach(c_sphere, r_sphere, N, T, Nt, Ae1, P, Np, d,
                            tolerance, Rp, ctx);
-  Ae = std::move(Ae1);
-  Nae = Nae1;
+  std::swap(Ae, Ae1);
 }
 
-void addnewpoint_sphere(const Vec3& x, std::vector<Tri3>& T, int& Nt, AeList& Ae,
-                        int& Nae, std::vector<Vec3>& P, int& Np) {
-  auto E = [&](int idx) -> Edge& { return Ae[static_cast<std::size_t>(idx)]; };
+void addnewpoint_sphere(const Vec3& x, std::vector<Tri3>& T, int& Nt,
+                        FrontRing& Ae, std::vector<Vec3>& P, int& Np) {
+  auto E = [&](int idx) -> Edge& { return Ae.at(idx); };
   P.push_back(x);
   Np = Np + 1;
   T.push_back(Tri3{E(1)[0], Np, E(1)[1]});
   Nt = Nt + 1;
-  // Ae=[Ae(2:Nae,:);Ae(1,1),Np;Np,Ae(1,2)]
+  // Ae=[Ae(2:Nae,:);Ae(1,1),Np;Np,Ae(1,2)] -- drop edge 1, append two.
   Edge t1{E(1)[0], Np};
   Edge t2{Np, E(1)[1]};
-  AeList nw = ae_from_rows(Ae, 2, Nae);
-  nw.push_back(t1);
-  nw.push_back(t2);
-  Ae = std::move(nw);
-  Nae = Nae + 1;
+  Ae.pop_front();
+  Ae.push_back(t1);
+  Ae.push_back(t2);
 }
 
 }  // namespace
@@ -884,18 +930,21 @@ LocalMesh mesh_sphpat(const Vec3& c_sphere, double r_sphere,
   std::vector<Vec3> P(1);  // 1-based, P[0] dummy
   int Np = 0;
 
-  AeList Ae = new_ae();
-  int Nae = 0;
+  // The patch's main front lives in ctx (grow-only across patches);
+  // loop_division/circle_division clear and rebuild it before any use, and the
+  // r_sphere == 0 path never touches it.
+  FrontRing& Ae = ctx.root;
+  Ae.clear();
 
   if (r_sphere != 0) {
     int k = patches[1];  // the k-th loop or the -k-th circle
     if (k > 0) {
       loop_division(c_sphere, r_sphere, loops[static_cast<std::size_t>(k)],
                     static_cast<int>(loops[static_cast<std::size_t>(k)].size()) - 1,
-                    segment0, Ae, Nae, P, Np, d, Rp, ctx);
+                    segment0, Ae, P, Np, d, Rp, ctx);
     } else {
       circle_division(c_sphere, r_sphere, circle0[static_cast<std::size_t>(-k)], Ae,
-                      Nae, P, Np, d, Rp, ctx);
+                      P, Np, d, Rp, ctx);
     }
 
     // build the inactive fronts (other loops/circles of this patch).
@@ -903,23 +952,27 @@ LocalMesh mesh_sphpat(const Vec3& c_sphere, double r_sphere,
 
     for (int i = 1; i <= ctx.nactive; ++i) {
       int kk = patches[static_cast<std::size_t>(i + 1)];
-      AeList Ae0;
-      int Nae0 = 0;
+      // Build in the scratch ring, then materialise as the plain 1-based AeList
+      // ActiveFront stores (a public-header type the sweeps read directly).
+      FrontRing& ring0 = ctx.scratch;
       if (kk > 0) {
         loop_division(c_sphere, r_sphere, loops[static_cast<std::size_t>(kk)],
                       static_cast<int>(loops[static_cast<std::size_t>(kk)].size()) - 1,
-                      segment0, Ae0, Nae0, P, Np, d, Rp, ctx);
+                      segment0, ring0, P, Np, d, Rp, ctx);
       } else {
         circle_division(c_sphere, r_sphere, circle0[static_cast<std::size_t>(-kk)],
-                        Ae0, Nae0, P, Np, d, Rp, ctx);
+                        ring0, P, Np, d, Rp, ctx);
       }
-      ctx.active[static_cast<std::size_t>(i)] = ActiveFront{0, std::move(Ae0), Nae0};
+      AeList Ae0(1);
+      Ae0.reserve(static_cast<std::size_t>(ring0.n) + 1);
+      for (int mm = 1; mm <= ring0.n; ++mm) Ae0.push_back(ring0.at(mm));
+      ctx.active[static_cast<std::size_t>(i)] = ActiveFront{0, std::move(Ae0), ring0.n};
     }
 
     // P[1..np_boundary] are the loop/circle division points (the patch boundary).
     int np_boundary = Np;
 
-    advancing_front_approach(c_sphere, r_sphere, N, T, Nt, Ae, Nae, P, Np, d,
+    advancing_front_approach(c_sphere, r_sphere, N, T, Nt, Ae, P, Np, d,
                              tolerance, Rp, ctx);
 
     if (Nt > 0) {  // there might exist an isolated point as a patch
@@ -949,6 +1002,61 @@ LocalMesh mesh_sphpat(const Vec3& c_sphere, double r_sphere,
     }
   }
   return out;
+}
+
+
+// ---------------------------------------------------------------------------
+// Parallel ordered merge (see meshing.hpp).
+// ---------------------------------------------------------------------------
+void merge_local_meshes(MeshState& state, const std::vector<LocalMesh*>& lms) {
+  const std::size_t n = lms.size();
+
+  // Serial prefix sum of the write bases. These are exactly the
+  // V.size()/F.size()/N.size() values the sequential add_patch calls would have
+  // seen, so every element lands at the same index with the same value.
+  std::vector<std::size_t> bv(n), bf(n), bn(n);
+  std::size_t v = state.V.size(), f = state.F.size(), nn = state.N.size();
+  for (std::size_t i = 0; i < n; ++i) {
+    const LocalMesh& lm = *lms[i];
+    bv[i] = v;
+    bf[i] = f;
+    bn[i] = nn;
+    v += lm.P.empty() ? 0 : lm.P.size() - 1;
+    f += lm.T.size();
+    nn += lm.NV.size();  // add_patch appends N only when normals are present
+  }
+  state.V.resize(v);
+  state.tags.resize(v);      // default TagList{} == the empty-vids case
+  state.vatom.resize(v, 0);  // 0 == the empty-patch_vatom case
+  state.F.resize(f);
+  state.N.resize(nn);
+
+  meshms::parallel_for(0, static_cast<int>(n), [&](int i) {
+    LocalMesh& lm = *lms[static_cast<std::size_t>(i)];
+    const std::size_t base = bv[static_cast<std::size_t>(i)];
+    const std::size_t fbase = bf[static_cast<std::size_t>(i)];
+    const std::size_t nbase = bn[static_cast<std::size_t>(i)];
+    const std::size_t Np = lm.P.empty() ? 0 : lm.P.size() - 1;
+    for (std::size_t k = 1; k <= Np; ++k) state.V[base + k - 1] = lm.P[k];
+    if (!lm.vids.empty()) {
+      for (std::size_t k = 0; k < Np; ++k)
+        state.tags[base + k] = std::move(lm.vids[k]);
+    }
+    if (!lm.vatom.empty()) {
+      for (std::size_t k = 0; k < Np; ++k) state.vatom[base + k] = lm.vatom[k];
+    }
+    for (std::size_t t = 0; t < lm.T.size(); ++t) {
+      const auto& tt = lm.T[t];
+      state.F[fbase + t] =
+          Tri{static_cast<int32_t>(tt[0] - 1 + static_cast<int>(base)),
+              static_cast<int32_t>(tt[1] - 1 + static_cast<int>(base)),
+              static_cast<int32_t>(tt[2] - 1 + static_cast<int>(base))};
+    }
+    for (std::size_t t = 0; t < lm.NV.size(); ++t) state.N[nbase + t] = lm.NV[t];
+    // Free the dead patch here, on the worker: the serial merge previously also
+    // serialised every cross-thread free.
+    lm = LocalMesh{};
+  });
 }
 
 }  // namespace meshms

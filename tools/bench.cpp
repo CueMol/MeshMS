@@ -61,9 +61,12 @@ static Stage run_once(const Geom& geom, double Rp, double d) {
   SESconcavepat(st, geom, di, ext, Rp, d, nb);
   auto t6 = clk::now();
   data_SEStorpat(st, geom, di, ds, dc, &ext, Rp, d);
+  // Move, don't copy: the real pipeline (pipeline.cpp) moves V/F out of the
+  // MeshState, so timing a ~10 MB deep copy here inflated the orient column by
+  // roughly 6x on the large molecules.
+  std::vector<Vec3> V = std::move(st.V);
+  std::vector<Tri> F = std::move(st.F);
   auto t7 = clk::now();
-  std::vector<Vec3> V = st.V;
-  std::vector<Tri> F = st.F;
   orient_faces(V, F, st.N);
   auto t8 = clk::now();
 

@@ -49,6 +49,17 @@ struct LocalMesh {
   bool emit = false;                         // false => driver must NOT add_patch
 };
 
+// Parallel ordered merge of locally-built patches into the mesh sink: appends
+// every LocalMesh in list order, producing output bit-identical to calling
+// state.add_patch(P, T, NV, move(vids), vatom) on each in sequence. A serial
+// prefix sum fixes the base index every patch writes at (exactly the values the
+// sequential merge would have observed), then the copies -- previously the
+// dominant serial tail of the convex/concave/toroidal stages -- run
+// patch-parallel into disjoint slices. Entries must have emit == true. Each
+// LocalMesh is left empty: its buffers are freed on the worker that copied it,
+// which also parallelises the cross-thread frees the serial merge paid.
+void merge_local_meshes(MeshState& state, const std::vector<LocalMesh*>& lms);
+
 // Per-face outward normal for each triangle of a spherical patch (compute_NV.m).
 //   T : 1-based [a,b,c] triples into P; P : 1-based (P[0] dummy).
 //   arg_NV = +1 convex (r_sphere>Rp), -1 concave.
