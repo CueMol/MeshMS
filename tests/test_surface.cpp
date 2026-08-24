@@ -173,6 +173,7 @@ void check_mol(const std::string& mol) {
 }  // namespace
 
 int main() {
+  MESHMS_SKIP_IF_FAST();
   check_mol("2spheres");
   check_mol("3spheres");
   check_mol("tetra");
