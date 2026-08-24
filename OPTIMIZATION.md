@@ -177,6 +177,40 @@ bytes. Three commits (Apple M2, best-of-15, 101M d=0.25; cumulative TBB 30.1 -> 
 Also fixed: tools/bench.cpp timed a ~10 MB V/F deep copy inside the orient span
 (the real pipeline moves them), inflating that column ~6x.
 
+## Round 3b (2026-08): fast-mode FP pass
+
+MESHMS_FP=fast only; a strict build is preprocessor-identical and its golden suite
+stays green. Verified by the equivalence gate.
+
+- **Angles as (group, cosine)**: every angle the mesher computes is only ever
+  compared, never consumed as a radian value, so angle_sphere/angle_vectors return
+  a comparable proxy and meshing.cpp loses ALL of its acos calls (~10% of serial
+  self time). Thresholds are exact constants (cos(5pi/4) = -sqrt2/2, cos(5pi/3) = 1/2).
+- **sqrt-free SAS predicates**: (+-q+rij)^2 + p == da^2 + rij^2 +- 2*rij*q, so both
+  circle-coverage tests square into comparisons of nonnegative quantities -- no
+  sqrt per neighbour in the O(sum Ri^2) coverage loop (rij^2 is `disc` exactly),
+  and the Y1/Y2 verification loops compare squared distances against Rext2.
+
+Measured (Apple M2, best-of-15, 101M d=0.25): fast TBB 19.9-20.3 ms vs strict
+22.6-23.1 ms; fast serial 80.3 ms vs strict 96.7 ms. Against the pre-round-3
+baseline: TBB 30.1 -> ~20 (-34%), serial 116 -> 80 (-31%).
+
+### Cell-list for the advancing front: measured, and deliberately NOT adopted
+
+Round 1 skipped the cell-list as byte-fragile. That objection is now obsolete: a
+formulation that gathers a conservative SUPERSET of candidate rows (ball radii
+with slack far above rounding) and re-evaluates the unchanged predicates in
+ascending row order is bit-identical to the full scan -- it was implemented and
+passed the strict golden suite 21/21. It is still not adopted, because it LOSES:
+101M d=0.25 convex went 26.6 -> 106 ms serial (7.0 -> 21.9 ms TBB). After the
+round-3a allocation work the O(Nae) sweep costs ~2 cheap norms per row over
+fronts that are only ~20-100 edges at practical densities, while each grid query
+pays tens of hash-cell lookups per iteration plus a rebuild per recursion frame.
+A cell edge is lower-bounded by the query radius (~1.75x tolerance), so the
+27-plus-cell gather floor cannot be engineered away; the scan is simply too
+cheap to beat at molecular patch sizes. Revisit only if fronts ever grow into
+the thousands of edges.
+
 ## Remaining serial tail (future, smaller payoff)
 
 At 28T@101M the serial-ish remainder is `data_Seg_Pat` (~1.6 ms), `data_ext` (flood-fill,
