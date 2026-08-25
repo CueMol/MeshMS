@@ -16,7 +16,7 @@
 #include <string>
 #include <vector>
 
-#include "meshms/capi.hpp"
+#include "meshms/meshms.hpp"
 #include "meshms/concave.hpp"
 #include "meshms/convex.hpp"
 #include "meshms/exterior.hpp"

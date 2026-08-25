@@ -6,7 +6,7 @@
 // MATLAB ext/int figure routing only chooses a figure; both branches mesh, so
 // the accumulated mesh is identical). `ext` is therefore unused (pass nullptr).
 //
-// FAITHFULNESS (see PORTING_CONTRACT / SHARED CONTRACT):
+// FAITHFULNESS (see docs/INTERNALS.md / SHARED CONTRACT):
 //   * Python scalar `x ** 2` -> meshms::pysq(x); _sqrt_pos(x) = (x>0?sqrt(x):0).
 //   * math.cos/sin/acos/tan/copysign -> std::cos/sin/acos/tan/copysign (libm).
 //   * 1-based-with-dummy P (P[0] dummy) and 1-based T triples.

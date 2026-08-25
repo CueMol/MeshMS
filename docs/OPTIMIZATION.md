@@ -265,7 +265,7 @@ What landed (all output-preserving):
 - **pipeline**: MeshState arrays moved (not copied) into Surface; `orient_faces`
   parallel per face.
 - **mesh_check**: ordered maps -> hash maps (uint64 edge keys); core templated so
-  `manifold_report`/`boundary_loops` gained facade-layout overloads -- the capi
+  `manifold_report`/`boundary_loops` gained facade-layout overloads -- the facade
   `analyze_mesh`/`boundary_diagnostics` no longer convert the whole mesh.
 - **weld**: `fill_small_holes`/`remove_nonmanifold_flaps` take V by value and move
   it through (V was copied unchanged).

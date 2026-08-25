@@ -91,7 +91,7 @@ WeldResult weld(const std::vector<Vec3>& V, const std::vector<Tri>& F, double to
 
 namespace {
 
-// Element adapters so the facade-layout overload (capi MeshResult arrays) runs
+// Element adapters so the facade-layout overload (facade MeshResult arrays) runs
 // the identical loop without a whole-mesh Vec3/Tri conversion.
 inline Vec3 blv_get(const std::vector<Vec3>& V, std::size_t i) { return V[i]; }
 inline Vec3 blv_get(const std::vector<std::array<double, 3>>& V, std::size_t i) {

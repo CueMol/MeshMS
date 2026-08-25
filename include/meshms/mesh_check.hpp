@@ -42,7 +42,7 @@ struct ManifoldReport {
 //   duplicate_faces    = #sorted-triples seen more than once.
 ManifoldReport manifold_report(const std::vector<Vec3>& V, const std::vector<Tri>& F);
 
-// Facade-layout overload: identical math over the capi MeshResult arrays
+// Facade-layout overload: identical math over the facade MeshResult arrays
 // (x,y,z triples and 0-based uint32 index triples) without converting the whole
 // mesh to Vec3/Tri first. Bit-identical results.
 ManifoldReport manifold_report(const std::vector<std::array<double, 3>>& V,

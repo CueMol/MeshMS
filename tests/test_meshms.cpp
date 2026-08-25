@@ -1,4 +1,4 @@
-// Verify Feature 3 (public C++ facade, capi.hpp):
+// Verify Feature 3 (public C++ facade, meshms.hpp):
 //   * build_surface_from_array(xyzr,...) is bit-for-bit identical (verts/faces/
 //     normals/atom_id) to the internal build_surface(file,...) -- guarantees the
 //     from-array Geom construction matches read_xyzr exactly;
@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-#include "meshms/capi.hpp"
+#include "meshms/meshms.hpp"
 #include "meshms/geom.hpp"
 #include "meshms/pipeline.hpp"
 #include "meshms/vec3.hpp"

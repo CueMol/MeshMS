@@ -1,7 +1,9 @@
 // Faithful port of the pipeline module (geometry path).
 #include "meshms/pipeline.hpp"
 
+#include <cmath>
 #include <cstdint>
+#include <exception>
 #include <stdexcept>
 #include <tuple>
 #include <utility>
@@ -174,11 +176,54 @@ Surface build_surface(const std::string& xyzr_path, double radius_probe,
   para.mesh_size = mesh_size;
 
   // jitter=None semantics: build from faithful coordinates with no perturbation.
-  // TODO: the build_surface jitter="auto" NaN-retry fallback (a deterministic
-  // DEFAULT_JITTER=1e-3 re-mesh when the result has NaN vertices) is out of
-  // scope -- it is numpy-PCG64-RNG-dependent and never triggered by the golden
-  // molecules, which mesh cleanly from their faithful coordinates.
+  // The jitter="auto" NaN-retry fallback lives in run_auto (call it on the geom
+  // read from the file when faithful coordinates yield a degenerate mesh); this
+  // file-path helper deliberately stays faithful-only.
   return run(geom, para, fuse);
+}
+
+bool surface_has_nan(const Surface& s) {
+  // A single non-finite vertex component poisons the whole surface (areas /
+  // normals propagate the NaN), so any non-finite component flags the mesh.
+  for (const Vec3& v : s.V) {
+    if (!std::isfinite(v.x) || !std::isfinite(v.y) || !std::isfinite(v.z))
+      return true;
+  }
+  return false;
+}
+
+Surface run_auto(const Geom& geom, const Para& para, bool fuse,
+                 double jitter_mag, int max_retries) {
+  // Deterministic (non-numpy-matching) degenerate-symmetry fallback. Attempt 0
+  // is the faithful run() so clean molecules stay bit-identical; only a NaN
+  // result triggers the jittered retries. Build failures are caught so a single
+  // unstable perturbation cannot abort the whole search.
+  Surface best;
+  bool have_best = false;
+  std::exception_ptr last_error;
+
+  for (int attempt = 0; attempt <= max_retries; ++attempt) {
+    try {
+      // attempt 0 == faithful centers; attempt k>=1 perturbs with seed = k.
+      const Geom& g = (attempt == 0) ? geom : jitter_centers(geom, jitter_mag, attempt);
+      // Re-run the full geom -> compute_rs -> build_mesh cycle: jittering the
+      // centers invalidates the RS arrangement, so build_mesh_from_cache reuse
+      // is not applicable here.
+      Surface s = run(g, para, fuse);
+      if (!surface_has_nan(s)) return s;  // first NaN-free mesh wins
+      best = std::move(s);                // keep the last finite-sized attempt
+      have_best = true;
+      last_error = nullptr;
+    } catch (...) {
+      last_error = std::current_exception();  // failed build -> keep trying
+    }
+  }
+
+  // Every attempt was degenerate: return the last successful (still-NaN) build
+  // as a best effort, or rethrow if even the last attempt threw.
+  if (have_best) return best;
+  if (last_error) std::rethrow_exception(last_error);
+  return best;  // unreachable for max_retries >= 0, but keeps the return total
 }
 
 }  // namespace meshms

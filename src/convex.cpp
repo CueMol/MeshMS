@@ -17,18 +17,8 @@ namespace meshms {
 
 namespace {
 
-// ----- record-matrix helpers (1-based-with-dummy rows AND columns) ----------
-template <std::size_t N>
-inline Vec3 rget3(const std::array<double, N>& row, int c0) {
-  return Vec3{row[static_cast<std::size_t>(c0)], row[static_cast<std::size_t>(c0 + 1)],
-              row[static_cast<std::size_t>(c0 + 2)]};
-}
-template <std::size_t N>
-inline void rset3(std::array<double, N>& row, int c0, const Vec3& v) {
-  row[static_cast<std::size_t>(c0)] = v.x;
-  row[static_cast<std::size_t>(c0 + 1)] = v.y;
-  row[static_cast<std::size_t>(c0 + 2)] = v.z;
-}
+// record-matrix helpers rget3/rset3 (1-based columns with a dummy column 0) live
+// in meshing.hpp; see the record-layout convention in docs/INTERNALS.md.
 
 // ----- mod_seg_loop_cir (port of Core/mod_seg_loop_cir.m) -------------------
 // Build the direction-corrected local loops_i0, overwrite the GLOBAL segment0

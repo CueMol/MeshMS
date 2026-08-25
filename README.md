@@ -73,12 +73,13 @@ into the `.vert`/`.face` headers.
 ## Using the library
 
 `find_package(MeshMS REQUIRED)` then link `MeshMS::MeshMS`. The ONLY header a
-consumer includes is the C++17-clean facade `<meshms/capi.hpp>` — it trades only
+consumer includes is the C++17-clean facade `<meshms/meshms.hpp>` — it trades only
 in `std` types, so no MeshMS-internal type crosses the boundary, and a C++17
-program links the C++20-built library directly.
+program links the C++20-built library directly. See [`docs/API.md`](docs/API.md)
+for the complete public API reference.
 
 ```cpp
-#include <meshms/capi.hpp>
+#include <meshms/meshms.hpp>
 using namespace meshms;
 
 std::vector<std::array<double,4>> atoms = /* {x,y,z,radius} per atom */;
@@ -137,7 +138,7 @@ output is the MSMS `.vert`/`.face` pair** (`<OUT>.vert` + `<OUT>.face`; any
 vertex line is `x y z  nx ny nz  0  closest_sphere  vertex_type` and each face line
 `v1 v2 v3 (1-based)  face_type  0`, with the SES component in `closest_sphere`
 (= `atom_id`) and the type fields. `--ply` (or an `OUT` ending in `.ply`) writes a
-single ASCII PLY instead. It is implemented entirely on top of `<meshms/capi.hpp>`
+single ASCII PLY instead. It is implemented entirely on top of `<meshms/meshms.hpp>`
 (argument/PLY/MSMS/xyzr I/O and reporting are the only things it does itself) — the
 worked example of consuming libMeshMS the way cuemol2/3 does.
 
@@ -162,7 +163,7 @@ within 1e-9, or exact-match meshes); 21/21 ctest green.
 | `pipeline` | end-to-end SES assembly | `test_surface` (vs golden meshes) |
 | `fusion` | ID-based boundary fusion (`fuse_by_id`) | `test_fusion` |
 | `weld`, `mesh_check` | weld/fill/flap repair + manifold report | `test_weld`, `test_mesh_check` |
-| `capi` (public facade) | the API above | `test_capi`, `test_capi_post`, `test_rscache`, `test_atomid` |
+| `meshms` (public facade) | the API above | `test_meshms`, `test_meshms_post`, `test_rscache`, `test_atomid` |
 | *(end-to-end, both FP modes)* | no throw / no NaN / bounded vertices / aggregates vs a frozen baseline / `close_cusps` watertight | `test_fp_gate` (11 molecule×density cases) |
 
 End-to-end the mesh reproduces the reference SES: topology EXACT, geometry within
@@ -179,17 +180,25 @@ build does not throw, no vertex is non-finite, every vertex stays inside the ato
 bounding box, and `close_cusps` still closes what it closed before. A consumer of a
 fast build should call `analyze_mesh()` once and confirm `nonfinite_vertices == 0`.
 
-Out of scope (deferred): analytic area/volume, the symmetry-jitter degenerate
-fallback, and all CGAL acceleration (power-diagram). The missing symmetry fallback
-is not only theoretical: `tests/data/fullerene.xyzr` (a perfectly symmetric C60)
-currently meshes to a broken surface — about half its vertices come out NaN — in a
-strict build as well, which is why it is excluded from `test_fp_gate`.
+Strongly symmetric molecules (e.g. fullerene) whose faithful coordinates collapse
+a toroidal patch into a NaN-poisoned mesh are handled by an automatic
+symmetry-jitter fallback: `build_surface_from_array` defaults to `Jitter::Auto`,
+which meshes faithfully first and only re-meshes with small deterministic center
+perturbations when the result is non-finite (clean molecules are unaffected and
+stay bit-exact). See [`docs/API.md`](docs/API.md) for the `Jitter` enum. The
+jittered mesh is std-lib-RNG dependent and thus not byte-stable across platforms,
+which is why fullerene stays excluded from `test_fp_gate`.
+
+Out of scope (deferred): analytic area/volume and all CGAL acceleration
+(power-diagram).
 
 ## Reference docs & fixtures
 
-- [`PORTING_CONTRACT.md`](PORTING_CONTRACT.md) — the indexing & data-layout
+- [`docs/API.md`](docs/API.md) — the complete public API reference (types,
+  functions, data contracts, output formats).
+- [`docs/INTERNALS.md`](docs/INTERNALS.md) — the indexing & data-layout
   conventions the code follows (1-based-with-dummy-row-0).
-- [`OPTIMIZATION.md`](OPTIMIZATION.md) — the 28-core, output-preserving parallel design.
+- [`docs/OPTIMIZATION.md`](docs/OPTIMIZATION.md) — the 28-core, output-preserving parallel design.
 
 `tests/data/` holds the `xyzr` input molecules and `tests/ref/` the frozen golden
 oracle the tests cross-check against. The fixtures are pre-generated and committed;

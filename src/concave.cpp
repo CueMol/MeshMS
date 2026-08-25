@@ -21,21 +21,8 @@ namespace {
 
 constexpr double EPSILON = 1.0e-10;
 
-// ----- record-matrix helpers (1-based-with-dummy rows AND columns) ----------
-// A "record matrix" row stores 1-based columns; column 0 is a dummy slot.
-
-// Read a length-3 coordinate from columns [c0, c0+1, c0+2] of a record row.
-template <std::size_t N>
-inline Vec3 rget3(const std::array<double, N>& row, int c0) {
-  return Vec3{row[static_cast<std::size_t>(c0)], row[static_cast<std::size_t>(c0 + 1)],
-              row[static_cast<std::size_t>(c0 + 2)]};
-}
-template <std::size_t N>
-inline void rset3(std::array<double, N>& row, int c0, const Vec3& v) {
-  row[static_cast<std::size_t>(c0)] = v.x;
-  row[static_cast<std::size_t>(c0 + 1)] = v.y;
-  row[static_cast<std::size_t>(c0 + 2)] = v.z;
-}
+// record-matrix helpers rget3/rset3 (1-based columns with a dummy column 0) live
+// in meshing.hpp; see the record-layout convention in docs/INTERNALS.md.
 
 // ----- small numerical helpers (mirror the MATLAB local functions) ----------
 inline double det3(const Vec3& r0, const Vec3& r1, const Vec3& r2) {

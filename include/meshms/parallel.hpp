@@ -9,7 +9,7 @@
 // Because iteration order is irrelevant to the result, the stages' former
 // dynamic scheduling needs no emulation; TBB's auto_partitioner over a
 // blocked_range is an equivalent dynamic split. This header is INTERNAL: never
-// included by the public facade (capi.hpp), so no TBB type crosses the boundary.
+// included by the public facade (meshms.hpp), so no TBB type crosses the boundary.
 #if defined(MESHMS_WITH_TBB)
 #include <tbb/blocked_range.h>
 #include <tbb/parallel_for.h>

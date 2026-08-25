@@ -23,11 +23,6 @@ namespace {
 // sqrt guarding against tiny negatives (MATLAB silently took the real part).
 inline double sqrt_pos(double x) { return x > 0.0 ? std::sqrt(x) : 0.0; }
 
-// math.acos(max(-1, min(1, x))) -- the Python clamp before acos.
-inline double acos_clamp(double x) {
-  return std::acos(std::max(-1.0, std::min(1.0, x)));
-}
-
 // ---------------------------------------------------------------------------
 // coord helpers (literal ports of the MATLAB local functions)
 // ---------------------------------------------------------------------------
@@ -74,7 +69,7 @@ Vec3 coord_cusp(int i, int j, int N_probe, int N_arc, const Vec3& P_k1,
     return A1;
   }
 
-  double theta = acos_clamp(r / Rp);
+  double theta = acos_clamped(r / Rp);
   double cos_arg = r / std::cos(theta + theta1 * i / N_probe);
   double radius_i = (cos_arg - Rp) / cos_arg * r;
   Vec3 Ai = A + sqrt_pos(pysq(cos_arg) - pysq(r)) * (A1 - A) / norm(A1 - A);
@@ -247,7 +242,7 @@ LocalMesh mesh_cusp(const Vec3& /*c1*/, double /*r1*/,
   // t is 1-based (dummy t[0]); MATLAB sets t(i+1) for i=1..N_probe, t(1)=0.
   std::vector<long long> t(static_cast<std::size_t>(N_probe) + 2, 0);
   for (int i = 1; i <= N_probe; ++i) {
-    double theta_i = acos_clamp(r / Rp) + theta1 / N_probe * i;
+    double theta_i = acos_clamped(r / Rp) + theta1 / N_probe * i;
     double L_i = r / std::cos(theta_i);
     double r_i = (L_i - Rp) / L_i * r;
     double angle_division = angle / N_arc;
@@ -422,7 +417,7 @@ void data_SEStorpat(MeshState& state, const Geom& geom, const DataI& di,
     // singular self-intersecting branch: r < Rp and dot(ci-A, cj-A) < 0
     if (r < Rp && dot(ci - A, cj - A) < 0.0) {
       Vec3 A1 = A - sqrt_pos(pysq(Rp) - pysq(r)) * n;
-      double theta1 = acos_clamp(r / (ri + Rp)) - acos_clamp(r / Rp);
+      double theta1 = acos_clamped(r / (ri + Rp)) - acos_clamped(r / Rp);
       Vec3 c1 = ci * Rp / (Rp + ri) + A * ri / (Rp + ri);
       double r1 = ri / (Rp + ri) * r;
       slots[0] = mesh_cusp(c1, r1, A1, direct, n, angle, r, A, P_k1, P_k2,
@@ -430,15 +425,15 @@ void data_SEStorpat(MeshState& state, const Geom& geom, const DataI& di,
                            /*e1=*/seg[2], /*e2=*/seg[3], /*tagged=*/true);
 
       Vec3 A2 = A + sqrt_pos(pysq(Rp) - pysq(r)) * n;
-      double theta2 = acos_clamp(r / (rj + Rp)) - acos_clamp(r / Rp);
+      double theta2 = acos_clamped(r / (rj + Rp)) - acos_clamped(r / Rp);
       c1 = cj * Rp / (Rp + rj) + A * rj / (Rp + rj);
       r1 = rj / (Rp + rj) * r;
       slots[1] = mesh_cusp(c1, r1, A2, direct, n, angle, r, A, P_k1, P_k2, theta2,
                            Rp, d, i, /*atom_rim=*/seg[1], /*e1=*/seg[2],
                            /*e2=*/seg[3], /*tagged=*/true);
     } else {
-      double theta1 = acos_clamp(r / (ri + Rp));
-      double theta2 = acos_clamp(r / (rj + Rp));
+      double theta1 = acos_clamped(r / (ri + Rp));
+      double theta2 = acos_clamped(r / (rj + Rp));
       slots[0] = mesh_toroide(ci, cj, ri, rj, direct, n, angle, r, A, P_k1,
                               P_k2, theta1, theta2, Rp, d, i,
                               /*atom_i=*/seg[0], /*atom_j=*/seg[1],
@@ -471,8 +466,8 @@ void data_SEStorpat(MeshState& state, const Geom& geom, const DataI& di,
       Vec3 A_i = A + std::copysign(h, dot(ci - A, n)) * n;
       Vec3 A_j = A + std::copysign(h, dot(cj - A, n)) * n;
 
-      double theta1 = acos_clamp(r / (ri + Rp)) - acos_clamp(r / Rp);
-      double theta2 = acos_clamp(r / (rj + Rp)) - acos_clamp(r / Rp);
+      double theta1 = acos_clamped(r / (ri + Rp)) - acos_clamped(r / Rp);
+      double theta2 = acos_clamped(r / (rj + Rp)) - acos_clamped(r / Rp);
 
       Vec3 c1 = ci * Rp / (Rp + ri) + A * ri / (Rp + ri);
       double r1 = ri / (Rp + ri) * r;
@@ -486,8 +481,8 @@ void data_SEStorpat(MeshState& state, const Geom& geom, const DataI& di,
                            theta2, Rp, d, -i, /*atom_rim=*/cj_idx, /*e1=*/0,
                            /*e2=*/0, /*tagged=*/true);
     } else {
-      double theta1 = acos_clamp(r / (ri + Rp));
-      double theta2 = acos_clamp(r / (rj + Rp));
+      double theta1 = acos_clamped(r / (ri + Rp));
+      double theta2 = acos_clamped(r / (rj + Rp));
       slots[0] = mesh_toroide(ci, cj, ri, rj, direct, n, TWO_PI, r, A, P_k1,
                               P_k1, theta1, theta2, Rp, d, -i,
                               /*atom_i=*/ci_idx, /*atom_j=*/cj_idx, /*e1=*/0,

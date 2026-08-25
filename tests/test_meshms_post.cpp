@@ -1,4 +1,4 @@
-// Verify the post-processing + diagnostics public API (capi.hpp) that the CLI and
+// Verify the post-processing + diagnostics public API (meshms.hpp) that the CLI and
 // cuemol2/3 build on. This test deliberately includes ONLY the public facade
 // (plus a local xyzr loader), exercising the library exactly as an external
 // consumer would -- no internal MeshMS headers.
@@ -12,7 +12,7 @@
 #include <string>
 #include <vector>
 
-#include "meshms/capi.hpp"
+#include "meshms/meshms.hpp"
 #include "test_util.hpp"
 
 using namespace meshms;
