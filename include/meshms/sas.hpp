@@ -2,9 +2,9 @@
 // SAS arrangement: triple intersection points (I) and free circles --- faithful
 // port of the sas module's data_I_Cir().
 //
-// Storage is the OOM-wall fix: the maxs-family
+// Storage is the OOM-wall fix: the triple-point vectors
 // (I/Iijk/direction/high_I/hightvalue) are APPEND vectors (push_back as the
-// triple-point counter s increments; maxs is only a reserve() hint). Ii is a
+// triple-point counter s increments, reserved to the exact count). Ii is a
 // per-atom growable list (CSR by In --- no kmax*(kmax-1) rectangle).
 // I_circle is jagged by (atom, neighbour-row), §2.4 (no
 // (M+1,kmax+1,nptmax) rectangle). The first real triple point is s=1; index 0

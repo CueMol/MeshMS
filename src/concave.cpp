@@ -318,11 +318,14 @@ LoopsOut loopconstruct_concave(const std::vector<std::array<double, 11>>& segmen
   std::vector<int> true_(static_cast<std::size_t>(N_segment) + 1, 0);
   int ntrue = 0;
 
-  int nhalf = N_segment / 2;
+  // Loops are appended as they are found (row 0 is the dummy). They are not
+  // pre-sized to N_segment/2 rows: that bound assumes every loop has at least
+  // two segments, but a segment whose two ends map_same merges into one point
+  // closes a loop on its own, and the next loop was then written past the end
+  // of the array (seen on 4V6X with CueMol's vdW radii).
   LoopsOut out;
-  out.loops.assign(static_cast<std::size_t>(nhalf) + 1,
-                   std::vector<int>(static_cast<std::size_t>(N_segment) + 1, 0));
-  out.loopsize.assign(static_cast<std::size_t>(nhalf) + 1, 0);
+  out.loops.assign(1, std::vector<int>{});
+  out.loopsize.assign(1, 0);
   out.nloops = 0;
 
   for (int k1 = 1; k1 <= N_segment; ++k1) {
@@ -359,13 +362,11 @@ LoopsOut loopconstruct_concave(const std::vector<std::array<double, 11>>& segmen
       // padded row would mesh phantom dummy (segment0[0]) segments on multi-loop /
       // loop+circle concave patches. (single-loop patches are unaffected.)
       loop.resize(static_cast<std::size_t>(loopsi) + 1);
-      out.loops[static_cast<std::size_t>(out.nloops)] = loop;
-      out.loopsize[static_cast<std::size_t>(out.nloops)] = loopsi;
+      out.loops.push_back(std::move(loop));
+      out.loopsize.push_back(loopsi);
     }
   }
 
-  out.loops.resize(static_cast<std::size_t>(out.nloops) + 1);
-  out.loopsize.resize(static_cast<std::size_t>(out.nloops) + 1);
   return out;
 }
 
