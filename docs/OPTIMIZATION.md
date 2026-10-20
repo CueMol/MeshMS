@@ -23,6 +23,31 @@ Larger molecules clear ~5×; small ones are Amdahl-bound by the fixed per-call o
 and the remaining serial stages. Combined with the ~300× the faithful C++ port already
 had over Python, **101M is ~1500× faster than the Python reference** (30.76 s → 20.6 ms).
 
+### Facade path (what cuemol2 runs), rounds 4-5
+
+The table above times the low-level `build_surface(fuse=false)`. A host application
+goes through the facade instead: `compute_rs_from_array` -> `build_mesh_from_cache`
+(`fuse=true`) -> `remove_flaps`, where fusion and the flap clean-up dominated until
+rounds 4 and 5. `BENCH_MODE=facade meshms_bench`, deploy build (`MESHMS_FP=fast`,
+bundled static oneTBB), Apple M-series 8 cores (4P+4E), best-of-30 small / 10 medium /
+3 for 4V6X, mesh size 0.805 A (cuemol2 dsurface default detail) unless noted. Output
+is byte-identical before and after.
+
+| molecule | atoms | 8 threads: before -> after | speedup | serial: before -> after | speedup |
+|---|--:|--:|--:|--:|--:|
+| 1YJO | 67 | 2.47 -> 1.26 ms | 2.0x | 4.07 -> 1.88 ms | 2.2x |
+| 1crn | 327 | 8.09 -> 3.63 ms | 2.2x | 18.0 -> 10.5 ms | 1.7x |
+| 1crn, d=0.22 | 327 | 48.7 -> 13.9 ms | 3.5x | 78.6 -> 38.2 ms | 2.1x |
+| 101M | 1413 | 27.6 -> 12.5 ms | 2.2x | 70.3 -> 45.9 ms | 1.5x |
+| barstar | 1426 | 26.3 -> 10.3 ms | 2.5x | 60.0 -> 38.2 ms | 1.6x |
+| 4HHB | 4779 | 165 -> 45 ms | 3.7x | 307 -> 156 ms | 2.0x |
+| 4HHB, d=0.33 | 4779 | 866 -> 98 ms | 8.9x | 1057 -> 286 ms | 3.7x |
+| 1AON | 58870 | 5051 -> 610 ms | 8.3x | 8420 -> 2081 ms | 4.0x |
+| 4V6X | 237685 | 22.5 -> 2.75 s | 8.2x | 38.7 -> 8.94 s | 4.3x |
+
+"before" is main before round 4; "after" is round 5. Per-round numbers are in the
+round 4 and round 5 sections below.
+
 ## How (output-preserving parallelism)
 
 The pattern throughout: do the expensive **independent per-entity** work in parallel into
