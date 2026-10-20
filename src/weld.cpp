@@ -6,6 +6,8 @@
 // the Python topology and (via %.17g coords) the exact welded coordinates.
 #include "meshms/weld.hpp"
 
+#include "meshms/parallel.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -447,6 +449,58 @@ FillResult fill_small_holes(std::vector<Vec3> V, const std::vector<Tri>& F,
   return out;
 }
 
+namespace {
+
+// Vertex -> incident-face adjacency in CSR form: the faces at vertex x are
+// face[off[x] .. off[x+1]), in ascending face index, with a face listed once per
+// corner it has at x (a degenerate face repeating x appears twice in a row).
+struct VertexFaces {
+  std::vector<int> off;
+  std::vector<int> face;
+};
+
+VertexFaces build_vertex_faces(const std::vector<Tri>& F, int nv) {
+  VertexFaces vf;
+  vf.off.assign(static_cast<std::size_t>(nv) + 1, 0);
+  for (const Tri& t : F)
+    for (int x : t) ++vf.off[static_cast<std::size_t>(x) + 1];
+  for (int x = 0; x < nv; ++x)
+    vf.off[static_cast<std::size_t>(x) + 1] += vf.off[static_cast<std::size_t>(x)];
+  vf.face.resize(F.size() * 3);
+  std::vector<int> fill(vf.off.begin(), vf.off.end() - 1);
+  for (std::size_t fi = 0; fi < F.size(); ++fi)
+    for (int x : F[fi]) vf.face[static_cast<std::size_t>(fill[static_cast<std::size_t>(x)]++)] =
+        static_cast<int>(fi);
+  return vf;
+}
+
+// Calls fn(v) for each edge slot (ab, bc, ca) of face t whose sorted key is
+// (u, v), i.e. whose smaller endpoint is u. A self-loop slot (u, u) counts too.
+template <typename Fn>
+inline void for_each_slot_from(const Tri& t, int u, Fn&& fn) {
+  const std::pair<int, int> es[3] = {ekey(t[0], t[1]), ekey(t[1], t[2]), ekey(t[2], t[0])};
+  for (const auto& e : es)
+    if (e.first == u) fn(e.second);
+}
+
+// Collects into `nbr` the far endpoint v of every edge slot keyed (u, v) over the
+// faces at u (each face once), sorted, so a run of equal v is that edge's face
+// count -- the same count the per-edge face lists of the original port held.
+inline void collect_slots_from(const VertexFaces& vf, const std::vector<Tri>& F, int u,
+                               std::vector<int>& nbr) {
+  nbr.clear();
+  const int b = vf.off[static_cast<std::size_t>(u)];
+  const int e = vf.off[static_cast<std::size_t>(u) + 1];
+  for (int k = b; k < e; ++k) {
+    const int fi = vf.face[static_cast<std::size_t>(k)];
+    if (k > b && vf.face[static_cast<std::size_t>(k) - 1] == fi) continue;
+    for_each_slot_from(F[static_cast<std::size_t>(fi)], u, [&](int v) { nbr.push_back(v); });
+  }
+  std::sort(nbr.begin(), nbr.end());
+}
+
+}  // namespace
+
 FlapResult remove_nonmanifold_flaps(std::vector<Vec3> V, const std::vector<Tri>& F,
                                     int passes, std::vector<std::uint32_t>* kept_orig) {
   FlapResult out;
@@ -463,70 +517,90 @@ FlapResult remove_nonmanifold_flaps(std::vector<Vec3> V, const std::vector<Tri>&
     return out;
   }
 
+  // Every decision in a pass reads only the faces as they were when the pass
+  // began, and the survivors keep their order, so the result depends only on
+  // WHICH faces are dropped -- never on the order edges or vertices are visited.
+  // That is what lets the edge scan run per vertex, in parallel.
   for (int pass = 0; pass < passes; ++pass) {
-    // vfaces[v] = face indices touching v (insertion order); edge_faces[e] = same.
-    std::unordered_map<int, std::vector<int>> vfaces;
-    std::vector<std::pair<int, int>> edge_order;
-    std::unordered_map<std::pair<int, int>, std::vector<int>, EdgeHash> edge_faces;
-    for (std::size_t fi = 0; fi < cur.size(); ++fi) {
-      const int a = cur[fi][0], b = cur[fi][1], c = cur[fi][2];
-      for (int x : {a, b, c}) vfaces[x].push_back(static_cast<int>(fi));
-      const std::pair<int, int> es[3] = {ekey(a, b), ekey(b, c), ekey(c, a)};
-      for (const auto& e : es) {
-        auto it = edge_faces.find(e);
-        if (it == edge_faces.end()) {
-          edge_faces.emplace(e, std::vector<int>{static_cast<int>(fi)});
-          edge_order.push_back(e);
-        } else {
-          it->second.push_back(static_cast<int>(fi));
+    int nv = 0;
+    for (const Tri& t : cur)
+      for (int x : t) nv = std::max(nv, x + 1);
+    const VertexFaces vf = build_vertex_faces(cur, nv);
+
+    // A non-manifold edge has >= 3 incident face slots. Flag each vertex that is
+    // the smaller endpoint of one; almost every vertex of a real mesh is not.
+    std::vector<char> has_nm(static_cast<std::size_t>(nv), 0);
+    parallel_for(0, nv, [&](int u) {
+      thread_local std::vector<int> nbr;
+      collect_slots_from(vf, cur, u, nbr);
+      for (std::size_t i = 0; i + 2 < nbr.size(); ++i) {
+        if (nbr[i] == nbr[i + 2]) {
+          has_nm[static_cast<std::size_t>(u)] = 1;
+          return;
         }
       }
-    }
+    });
 
-    // non-manifold edges in first-seen order (Python dict iteration order).
     std::vector<std::pair<int, int>> nm_edges;
-    for (const auto& e : edge_order) {
-      if (edge_faces[e].size() >= 3) nm_edges.push_back(e);
+    std::vector<int> nbr;
+    for (int u = 0; u < nv; ++u) {
+      if (!has_nm[static_cast<std::size_t>(u)]) continue;
+      collect_slots_from(vf, cur, u, nbr);
+      for (std::size_t i = 0; i < nbr.size();) {
+        std::size_t j = i;
+        while (j < nbr.size() && nbr[j] == nbr[i]) ++j;
+        if (j - i >= 3) nm_edges.emplace_back(u, nbr[i]);
+        i = j;
+      }
     }
     if (nm_edges.empty()) break;
 
-    std::unordered_set<int> drop;
+    std::vector<char> drop(cur.size(), 0);
+    bool any_drop = false;
     for (const auto& e : nm_edges) {
-      for (int fi : edge_faces[e]) {
+      const int b = vf.off[static_cast<std::size_t>(e.first)];
+      const int en = vf.off[static_cast<std::size_t>(e.first) + 1];
+      for (int k = b; k < en; ++k) {
+        const int fi = vf.face[static_cast<std::size_t>(k)];
+        if (k > b && vf.face[static_cast<std::size_t>(k) - 1] == fi) continue;
+        const Tri& t = cur[static_cast<std::size_t>(fi)];
+        bool on_edge = false;
+        for_each_slot_from(t, e.first, [&](int v) { on_edge = on_edge || v == e.second; });
+        if (!on_edge) continue;
         // third = the apex vertex of this face not on the edge.
         int third = -1;
-        for (int x : {cur[static_cast<std::size_t>(fi)][0],
-                      cur[static_cast<std::size_t>(fi)][1],
-                      cur[static_cast<std::size_t>(fi)][2]}) {
+        for (int x : t) {
           if (x != e.first && x != e.second) {
             third = x;
             break;
           }
         }
+        if (third < 0) continue;
         // apex hangs ONLY off this edge -> the whole fan at `third` is a flap.
+        const int tb = vf.off[static_cast<std::size_t>(third)];
+        const int te = vf.off[static_cast<std::size_t>(third) + 1];
         bool all_on_edge = true;
-        for (int gi : vfaces[third]) {
-          const Tri& g = cur[static_cast<std::size_t>(gi)];
+        for (int m = tb; m < te && all_on_edge; ++m) {
+          const Tri& g = cur[static_cast<std::size_t>(vf.face[static_cast<std::size_t>(m)])];
           const bool has_u = (e.first == g[0] || e.first == g[1] || e.first == g[2]);
           const bool has_v = (e.second == g[0] || e.second == g[1] || e.second == g[2]);
-          if (!(has_u && has_v)) {
-            all_on_edge = false;
-            break;
-          }
+          all_on_edge = has_u && has_v;
         }
         if (all_on_edge) {
-          for (int gi : vfaces[third]) drop.insert(gi);
+          for (int m = tb; m < te; ++m)
+            drop[static_cast<std::size_t>(vf.face[static_cast<std::size_t>(m)])] = 1;
+          any_drop = any_drop || te > tb;
         }
       }
     }
-    if (drop.empty()) break;
+    if (!any_drop) break;
 
     std::vector<Tri> kept;
     std::vector<std::uint32_t> kept_idx;
     kept.reserve(cur.size());
     kept_idx.reserve(cur.size());
     for (std::size_t i = 0; i < cur.size(); ++i) {
-      if (!drop.count(static_cast<int>(i))) {
+      if (!drop[i]) {
         kept.push_back(cur[i]);
         kept_idx.push_back(idx[i]);
       }
