@@ -211,6 +211,44 @@ A cell edge is lower-bounded by the query radius (~1.75x tolerance), so the
 cheap to beat at molecular patch sizes. Revisit only if fronts ever grow into
 the thousands of edges.
 
+## Round 4 (2026-10): `remove_flaps` (facade post-processing, bit-exact)
+
+Found from cuemol2: a large molecule meshed through the facade (`compute_rs_from_array`
+-> `build_mesh_from_cache(fuse=true)` -> `remove_flaps`) ran on one core most of the
+time. `remove_nonmanifold_flaps` rebuilt a vertex->faces and an edge->faces
+`unordered_map` (vector values, no reserve) over every face on every pass, serially,
+only to find that a clean mesh has no non-manifold edge -- 4V6X (237k atoms) has 44 of
+them among ~14M edges. It took ~50-70% of the facade time at every size.
+
+Now each pass builds the vertex->faces adjacency as a CSR (counting sort, faces in
+ascending index, a face listed once per corner exactly like the old lists), and finds
+non-manifold edges per vertex in a `parallel_for`: vertex u counts the slots of the edges
+it is the smaller endpoint of (self-loops of degenerate faces included) over its own
+faces. Only the few flagged vertices are revisited serially for the flap test, and the
+drop set is a `vector<char>`. Output-preserving because every decision of a pass reads
+the faces as they were when the pass began and the survivors keep their order, so the
+result depends only on which faces are dropped, never on the visiting order.
+`test_weld` checks the rewrite against a verbatim copy of the old port on random tangled
+meshes (multi-pass flaps, degenerate faces); the CLI output on 1YJO .. 4V6X is
+byte-identical before and after on both builds.
+
+`BENCH_MODE=facade meshms_bench` times the facade stages. Apple M-series, 8 cores,
+`MESHMS_FP=fast`, best-of-30 (small) / 10 (4HHB, 1AON) / 3 (4V6X), d=0.805 unless noted:
+
+| molecule | atoms | flaps TBB before -> after | facade total TBB before -> after | total serial before -> after |
+|---|--:|--:|--:|--:|
+| 1YJO | 67 | 1.00 -> 0.13 ms | 2.47 -> 1.58 ms | 4.07 -> 3.27 ms |
+| 1crn | 327 | 3.18 -> 0.36 ms | 8.09 -> 5.21 ms | 18.0 -> 15.4 ms |
+| 1crn d=0.22 | 327 | 31.2 -> 2.7 ms | 48.7 -> 19.6 ms | 78.6 -> 52.6 ms |
+| 101M | 1413 | 10.3 -> 1.0 ms | 27.6 -> 18.0 ms | 70.3 -> 61.2 ms |
+| 4HHB | 4779 | 97.9 -> 5.6 ms | 165 -> 70 ms | 307 -> 227 ms |
+| 1AON | 58870 | 3538 -> 83 ms | 5051 -> 1602 ms | 8420 -> 5262 ms |
+| 4V6X | 237685 | 15453 -> 384 ms | 22451 -> 7594 ms | 38730 -> 24008 ms |
+
+Not changed here: `build_mesh_from_cache` appends components with an exact-fit
+`reserve` per component, which is quadratic when a structure splits into many
+components.
+
 ## Remaining serial tail (future, smaller payoff)
 
 At 28T@101M the serial-ish remainder is `data_Seg_Pat` (~1.6 ms), `data_ext` (flood-fill,

@@ -9,10 +9,13 @@
 //   g++ -std=c++20 -O3 -march=native -ffp-contract=off \
 //       -I include tools/bench.cpp build/libMeshMS.a -ltbb -o /tmp/bench
 // Run:  meshms_bench <data_dir> <mol>:<mesh_size> ... (oneTBB auto-detects cores)
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -86,6 +89,66 @@ static Stage run_once(const Geom& geom, double Rp, double d) {
   return s;
 }
 
+// The facade path a host application (cuemol2) runs: RS, fused mesh, then the
+// flap clean-up. Each stage is timed on its own so remove_flaps can be compared
+// across builds; nF is the face count left after remove_flaps.
+struct FacadeStage {
+  double total = 0, rs = 0, mesh = 0, flaps = 0;
+  std::size_t nF = 0;
+};
+
+static FacadeStage run_facade_once(const std::vector<std::array<double, 4>>& xyzr,
+                                   double Rp, double d) {
+  FacadeStage s;
+  auto t0 = clk::now();
+  std::shared_ptr<RSCache> rs = compute_rs_from_array(xyzr, Rp);
+  auto t1 = clk::now();
+  MeshResult mesh = build_mesh_from_cache(rs, d, /*fuse=*/true);
+  auto t2 = clk::now();
+  MeshResult clean = remove_flaps(mesh);
+  auto t3 = clk::now();
+  s.total = ms(t0, t3);
+  s.rs = ms(t0, t1);
+  s.mesh = ms(t1, t2);
+  s.flaps = ms(t2, t3);
+  s.nF = clean.faces.size();
+  return s;
+}
+
+// BENCH_MODE=facade: best-of-`reps` per stage (each column is its own minimum,
+// since the stages are independent of each other's timing noise).
+static void bench_facade(const std::string& dir, int argc, char** argv, int reps,
+                         double Rp) {
+  std::printf("%-9s %6s %10s | %9s %10s %9s %9s\n", "mol", "atoms", "total_ms", "rs",
+              "mesh", "flaps", "nF");
+  for (int ai = 2; ai < argc; ++ai) {
+    std::string arg = argv[ai];
+    auto colon = arg.find(':');
+    std::string mol = arg.substr(0, colon);
+    double d = std::stod(arg.substr(colon + 1));
+    Geom geom = read_xyzr(dir + "/" + mol + ".xyzr");
+    std::vector<std::array<double, 4>> xyzr;
+    xyzr.reserve(static_cast<std::size_t>(geom.M));
+    for (int i = 1; i <= geom.M; ++i) {
+      const Vec3& c = geom.centers[static_cast<std::size_t>(i)];
+      xyzr.push_back({c.x, c.y, c.z, geom.R[static_cast<std::size_t>(i)]});
+    }
+
+    FacadeStage best;
+    best.total = best.rs = best.mesh = best.flaps = std::numeric_limits<double>::max();
+    for (int r = 0; r < reps; ++r) {
+      FacadeStage s = run_facade_once(xyzr, Rp, d);
+      best.total = std::min(best.total, s.total);
+      best.rs = std::min(best.rs, s.rs);
+      best.mesh = std::min(best.mesh, s.mesh);
+      best.flaps = std::min(best.flaps, s.flaps);
+      best.nF = s.nF;
+    }
+    std::printf("%-9s %6d %10.3f | %9.3f %10.3f %9.3f %9zu\n", mol.c_str(), geom.M,
+                best.total, best.rs, best.mesh, best.flaps, best.nF);
+  }
+}
+
 int main(int argc, char** argv) {
   if (argc < 3) {
     std::fprintf(stderr, "usage: bench <data_dir> <mol>:<mesh> ...\n");
@@ -100,6 +163,12 @@ int main(int argc, char** argv) {
   // Banner names the build, so a pasted table is self-describing about which FP
   // policy produced it.
   std::printf("# %s\n", build_info());
+  if (const char* m = std::getenv("BENCH_MODE")) {
+    if (std::string(m) == "facade") {
+      bench_facade(dir, argc, argv, reps, Rp);
+      return 0;
+    }
+  }
   std::printf("%-9s %6s %9s | %8s %9s %8s %7s %7s %7s %7s %6s %7s %10s\n", "mol", "atoms",
               "total_ms", "inter", "dICir", "segpat", "ext", "convex", "concav", "torus",
               "orient", "nV", "area");

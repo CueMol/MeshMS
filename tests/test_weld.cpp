@@ -10,6 +10,8 @@
 //   pinched        -- a degree-4 figure-8 boundary split into two directed cycles;
 //   flap           -- a doubled flap dropped by remove_nonmanifold_flaps (then the
 //                     exposed perimeter is fan-filled).
+// It also checks remove_nonmanifold_flaps against a reference copy of its
+// original hash-map port on random tangled meshes (check_flaps_reference).
 // The real meshes come from the C++ build_surface; the synthetic meshes are
 // reconstructed here byte-for-byte from the reference dump.
 //
@@ -21,8 +23,12 @@
 #include <cstdio>
 #include <fstream>
 #include <numbers>
+#include <random>
 #include <sstream>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "meshms/pipeline.hpp"
@@ -332,9 +338,139 @@ void check_case(const std::string& cs) {
       static_cast<int>(fi.F.size()), g.bl.nloops, g.bl.nnm, g.fbl.nloops);
 }
 
+// The original remove_nonmanifold_flaps port (per-vertex and per-edge hash maps
+// in Python insertion order), kept verbatim as the reference the CSR rewrite
+// must reproduce face for face.
+struct PairHash {
+  std::size_t operator()(const std::pair<int, int>& e) const {
+    return std::hash<long long>{}((static_cast<long long>(e.first) << 32) ^
+                                  static_cast<unsigned>(e.second));
+  }
+};
+
+std::pair<int, int> ref_ekey(int u, int v) {
+  return (u < v) ? std::make_pair(u, v) : std::make_pair(v, u);
+}
+
+std::vector<Tri> ref_remove_flaps(const std::vector<Tri>& F, int passes,
+                                  std::vector<std::uint32_t>& idx, int& npass_dropped) {
+  std::vector<Tri> cur = F;
+  idx.resize(cur.size());
+  for (std::size_t i = 0; i < idx.size(); ++i) idx[i] = static_cast<std::uint32_t>(i);
+  npass_dropped = 0;
+  for (int pass = 0; pass < passes; ++pass) {
+    std::unordered_map<int, std::vector<int>> vfaces;
+    std::vector<std::pair<int, int>> edge_order;
+    std::unordered_map<std::pair<int, int>, std::vector<int>, PairHash> edge_faces;
+    for (std::size_t fi = 0; fi < cur.size(); ++fi) {
+      const int a = cur[fi][0], b = cur[fi][1], c = cur[fi][2];
+      for (int x : {a, b, c}) vfaces[x].push_back(static_cast<int>(fi));
+      for (const auto& e : {ref_ekey(a, b), ref_ekey(b, c), ref_ekey(c, a)}) {
+        auto it = edge_faces.find(e);
+        if (it == edge_faces.end()) {
+          edge_faces.emplace(e, std::vector<int>{static_cast<int>(fi)});
+          edge_order.push_back(e);
+        } else {
+          it->second.push_back(static_cast<int>(fi));
+        }
+      }
+    }
+    std::vector<std::pair<int, int>> nm_edges;
+    for (const auto& e : edge_order)
+      if (edge_faces[e].size() >= 3) nm_edges.push_back(e);
+    if (nm_edges.empty()) break;
+    std::unordered_set<int> drop;
+    for (const auto& e : nm_edges) {
+      for (int fi : edge_faces[e]) {
+        int third = -1;
+        for (int x : cur[static_cast<std::size_t>(fi)]) {
+          if (x != e.first && x != e.second) {
+            third = x;
+            break;
+          }
+        }
+        bool all_on_edge = true;
+        for (int gi : vfaces[third]) {
+          const Tri& g = cur[static_cast<std::size_t>(gi)];
+          const bool has_u = (e.first == g[0] || e.first == g[1] || e.first == g[2]);
+          const bool has_v = (e.second == g[0] || e.second == g[1] || e.second == g[2]);
+          if (!(has_u && has_v)) {
+            all_on_edge = false;
+            break;
+          }
+        }
+        if (all_on_edge)
+          for (int gi : vfaces[third]) drop.insert(gi);
+      }
+    }
+    if (drop.empty()) break;
+    ++npass_dropped;
+    std::vector<Tri> kept;
+    std::vector<std::uint32_t> kept_idx;
+    for (std::size_t i = 0; i < cur.size(); ++i) {
+      if (!drop.count(static_cast<int>(i))) {
+        kept.push_back(cur[i]);
+        kept_idx.push_back(idx[i]);
+      }
+    }
+    cur = std::move(kept);
+    idx = std::move(kept_idx);
+  }
+  return cur;
+}
+
+// Random tangled meshes: flap fans stacked on shared edges (so dropping one fan
+// exposes the next on a later pass), plus random and degenerate faces that make
+// many non-manifold edges. The rewrite must keep exactly the reference's faces,
+// in order, with the same original indices.
+void check_flaps_reference() {
+  int multi_pass_seeds = 0;
+  for (unsigned seed = 1; seed <= 20; ++seed) {
+    std::mt19937 rng(seed);
+    const int nbase = 24;
+    std::vector<Tri> F;
+    int next_v = nbase;
+    for (int k = 0; k < 40; ++k) {
+      const int a = static_cast<int>(rng() % nbase);
+      const int b = static_cast<int>(rng() % nbase);
+      const int c = static_cast<int>(rng() % nbase);
+      F.push_back(Tri{a, b, (rng() % 6 == 0) ? a : c});  // some degenerate
+    }
+    for (int k = 0; k < 8; ++k) {
+      // On edge (u, v): apex b is a flap at once; apex a also carries a fan on
+      // edge (u, a) whose apex x is a flap, so a becomes a flap only on the pass
+      // after x is dropped; apex c is anchored elsewhere and keeps (u, v)
+      // non-manifold for that later pass.
+      const int u = static_cast<int>(rng() % nbase);
+      const int v = (u + 1 + static_cast<int>(rng() % (nbase - 1))) % nbase;
+      const int w = static_cast<int>(rng() % nbase);
+      const int a = next_v++, x = next_v++, b = next_v++, c = next_v++, y = next_v++;
+      F.insert(F.end(), {Tri{u, v, a}, Tri{v, u, a}, Tri{a, u, x}, Tri{u, a, x},
+                         Tri{u, v, b}, Tri{v, u, b},
+                         Tri{u, v, c}, Tri{v, u, c}, Tri{c, w, y}});
+    }
+    const std::vector<Vec3> V(static_cast<std::size_t>(next_v + 1), Vec3{});
+
+    std::vector<std::uint32_t> ref_idx;
+    int npass = 0;
+    const std::vector<Tri> ref = ref_remove_flaps(F, 4, ref_idx, npass);
+    if (npass >= 2) ++multi_pass_seeds;
+
+    std::vector<std::uint32_t> got_idx;
+    FlapResult got = remove_nonmanifold_flaps(V, F, 4, &got_idx);
+    CHECK(got.F == ref);
+    CHECK(got_idx == ref_idx);
+    CHECK(ref.size() < F.size());  // the case actually drops faces
+  }
+  // The stacked fans must make some seeds need more than one dropping pass.
+  CHECK(multi_pass_seeds > 0);
+  std::printf("  flaps-ref 20 seeds match, %d needed >= 2 passes\n", multi_pass_seeds);
+}
+
 }  // namespace
 
 int main() {
+  check_flaps_reference();
   check_case("tetra");
   check_case("ArgArg");
   check_case("annulus");
