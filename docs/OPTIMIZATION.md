@@ -23,6 +23,31 @@ Larger molecules clear ~5×; small ones are Amdahl-bound by the fixed per-call o
 and the remaining serial stages. Combined with the ~300× the faithful C++ port already
 had over Python, **101M is ~1500× faster than the Python reference** (30.76 s → 20.6 ms).
 
+### Facade path (what cuemol2 runs), rounds 4-5
+
+The table above times the low-level `build_surface(fuse=false)`. A host application
+goes through the facade instead: `compute_rs_from_array` -> `build_mesh_from_cache`
+(`fuse=true`) -> `remove_flaps`, where fusion and the flap clean-up dominated until
+rounds 4 and 5. `BENCH_MODE=facade meshms_bench`, deploy build (`MESHMS_FP=fast`,
+bundled static oneTBB), Apple M-series 8 cores (4P+4E), best-of-30 small / 10 medium /
+3 for 4V6X, mesh size 0.805 A (cuemol2 dsurface default detail) unless noted. Output
+is byte-identical before and after.
+
+| molecule | atoms | 8 threads: before -> after | speedup | serial: before -> after | speedup |
+|---|--:|--:|--:|--:|--:|
+| 1YJO | 67 | 2.47 -> 1.26 ms | 2.0x | 4.07 -> 1.88 ms | 2.2x |
+| 1crn | 327 | 8.09 -> 3.63 ms | 2.2x | 18.0 -> 10.5 ms | 1.7x |
+| 1crn, d=0.22 | 327 | 48.7 -> 13.9 ms | 3.5x | 78.6 -> 38.2 ms | 2.1x |
+| 101M | 1413 | 27.6 -> 12.5 ms | 2.2x | 70.3 -> 45.9 ms | 1.5x |
+| barstar | 1426 | 26.3 -> 10.3 ms | 2.5x | 60.0 -> 38.2 ms | 1.6x |
+| 4HHB | 4779 | 165 -> 45 ms | 3.7x | 307 -> 156 ms | 2.0x |
+| 4HHB, d=0.33 | 4779 | 866 -> 98 ms | 8.9x | 1057 -> 286 ms | 3.7x |
+| 1AON | 58870 | 5051 -> 610 ms | 8.3x | 8420 -> 2081 ms | 4.0x |
+| 4V6X | 237685 | 22.5 -> 2.75 s | 8.2x | 38.7 -> 8.94 s | 4.3x |
+
+"before" is main before round 4; "after" is round 5. Per-round numbers are in the
+round 4 and round 5 sections below.
+
 ## How (output-preserving parallelism)
 
 The pattern throughout: do the expensive **independent per-entity** work in parallel into
@@ -248,6 +273,44 @@ byte-identical before and after on both builds.
 Not changed here: `build_mesh_from_cache` appends components with an exact-fit
 `reserve` per component, which is quadratic when a structure splits into many
 components.
+
+## Round 5 (2026-10): `fuse_by_id` sort-and-sweep (bit-exact)
+
+After round 4, a stage breakdown of the facade (`BENCH_MODE=facade`) put `fuse_by_id`
+at 38% of the time on 1crn and 69% on 4V6X, scaling only 2.3-3.2x on 8 cores. It built
+a `(tag, cell) -> [vertex]` `unordered_map` serially (5.1M keys on 4V6X), then probed
+27 neighbour cells per tag of each of ~10M tagged vertices -- cache-missing hash lookups
+that capped the parallel phase. With cell = eps = 1e-6 almost every key holds one
+vertex, so the probes found little.
+
+Now every `(tag, cell, vertex)` entry goes into a flat array, sorted with
+`meshms::parallel_sort` (a total order, so the result is deterministic), and each entry
+is compared only with the following entries of the same tag up to one x cell above;
+the y/z cell and `dot(dv, dv) < eps^2` tests are the old predicate. The sweep runs in
+fixed blocks in parallel. Roots map to new indices through a flat array instead of a
+hash map. The union-find partition is order-independent (round 2's argument), so the
+output is unchanged: the same 9,486,972 fused pairs on 4V6X, and `meshms_cli` output on
+1YJO .. 4V6X byte-identical on both builds. `test_fusion` compares the rewrite with a
+copy of the hash-grid port on random tagged clouds (cell-straddling copies, double and
+repeated tags, untagged vertices, short tag lists), under every FP policy.
+
+Facade total, before -> after (Apple M-series, 8 cores, `MESHMS_FP=fast`, best-of-30
+small / 10 medium / 3 for 4V6X, d=0.805 unless noted):
+
+| molecule | atoms | TBB | serial |
+|---|--:|--:|--:|
+| 1YJO | 67 | 1.66 -> 1.26 ms | 3.27 -> 1.88 ms |
+| 1crn | 327 | 5.17 -> 3.63 ms | 15.4 -> 10.5 ms |
+| 1crn d=0.22 | 327 | 19.6 -> 13.9 ms | 53.0 -> 38.2 ms |
+| 101M | 1413 | 18.1 -> 12.5 ms | 61.9 -> 45.9 ms |
+| 4HHB | 4779 | 70.7 -> 44.9 ms | 227 -> 156 ms |
+| 1AON | 58870 | 1604 -> 610 ms | 5327 -> 2081 ms |
+| 4V6X | 237685 | 7580 -> 2753 ms | 24121 -> 8935 ms |
+
+On 4V6X `fuse_by_id` itself went from 5.2 s to 0.4 s (TBB). The remaining profile is
+flat: `data_I_Cir` ~25% (already ~5x on 8 cores), the three meshers ~20%, and serial
+copies / vertex normals (`compute_vertex_normals`, `append_surface`, the `remove_flaps`
+conversions and its recomputed normals) 11-23%.
 
 ## Remaining serial tail (future, smaller payoff)
 

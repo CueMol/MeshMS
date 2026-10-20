@@ -10,9 +10,11 @@
 // dynamic scheduling needs no emulation; TBB's auto_partitioner over a
 // blocked_range is an equivalent dynamic split. This header is INTERNAL: never
 // included by the public facade (meshms.hpp), so no TBB type crosses the boundary.
+#include <algorithm>
 #if defined(MESHMS_WITH_TBB)
 #include <tbb/blocked_range.h>
 #include <tbb/parallel_for.h>
+#include <tbb/parallel_sort.h>
 #endif
 
 namespace meshms {
@@ -29,6 +31,17 @@ inline void parallel_for(int begin, int end, Body&& body) {
                     });
 #else
   for (int i = begin; i < end; ++i) body(i);
+#endif
+}
+
+// Sort [first, last) by `less`. Not stable, so callers that need a deterministic
+// result must make `less` a total order (no two distinct elements equivalent).
+template <typename It, typename Less>
+inline void parallel_sort(It first, It last, Less less) {
+#if defined(MESHMS_WITH_TBB)
+  tbb::parallel_sort(first, last, less);
+#else
+  std::sort(first, last, less);
 #endif
 }
 

@@ -9,10 +9,10 @@
 // Interior vertices (empty TagList == Python None) are never fused.
 //
 // The eps test is only a coincidence confirmation scoped to a shared-tag group:
-// per-tag spatial hash grids (cell = eps) find the eps-coincident partners in
-// O(1) -- if dd < eps^2 then every axis-difference is < eps, so the two cells
-// differ by at most 1 per axis, and probing the 27 neighbour cells catches every
-// coincident pair exactly (identical V2/F2 to a linear scan).
+// the (tag, cell = eps, vertex) entries are sorted and each is compared only with
+// the following entries of the same tag up to one x cell above -- if dd < eps^2
+// then every axis-difference is < eps, so the two cells differ by at most 1 per
+// axis and no coincident pair is missed (identical V2/F2 to a linear scan).
 //
 // warn=False: the displaced-partner near-miss diagnostic (the coarse grid_warn
 // grid) is dropped -- the pipeline always calls warn=False, and the near-miss
