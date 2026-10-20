@@ -84,15 +84,6 @@ std::pair<DataI, DataCir> data_I_Cir(const Geom& geom, const Neighbors& nb, doub
   DataI di;
   DataCir dc;
 
-  // maxs is ONLY a reserve() hint (the maxs-family are append vectors): the
-  // provable triple-point upper bound sum_i Row[i]*(Row[i]-1)/3 + 1.
-  long long sum = 0;
-  for (int i = 1; i <= M; ++i) {
-    const long long r = Row(i);
-    sum += r * (r - 1);
-  }
-  const std::size_t maxs = static_cast<std::size_t>(sum / 3) + 1;
-
   // ---------------------------------------------------------------------------
   // PHASE 1: parallel, READ-ONLY. Each thread fills its own ev[i] (no shared
   // write). The body is the exact serial logic with mutation replaced by
@@ -313,17 +304,31 @@ std::pair<DataI, DataCir> data_I_Cir(const Geom& geom, const Neighbors& nb, doub
   // serial s-numbering and every append order BIT-FOR-BIT.
   // ---------------------------------------------------------------------------
 
-  // s is 1-based: index 0 of every maxs-family vector is the dummy row.
+  // Exact counts from the phase-1 events, used as reserve() hints (capacity
+  // only; contents and order are untouched). The provable upper bound
+  // sum_i Row[i]*(Row[i]-1)/3 is far too loose to reserve against: on a
+  // 237k-atom ribosome it asked for a single 3.6 GB block for I alone, while
+  // the real count is a small fraction of it, and an embedding process whose
+  // allocator refuses single blocks past 2 GB (Electron's PartitionAlloc)
+  // aborts on such a request.
+  std::size_t ntriple = 0;
+  std::size_t ncircle_ev = 0;
+  for (int i = 1; i <= M; ++i) {
+    ntriple += ev[static_cast<std::size_t>(i)].triples.size();
+    ncircle_ev += ev[static_cast<std::size_t>(i)].circles.size();
+  }
+
+  // s is 1-based: index 0 of every triple-point vector is the dummy row.
   di.I.assign(1, Vec3{});
   di.Iijk.assign(1, std::array<int32_t, 3>{0, 0, 0});
   di.direction.assign(1, std::array<int32_t, 3>{0, 0, 0});
   di.high_I.assign(1, 1);  // dummy row 0 == 1 (Python high_I = np.ones(...))
   di.hightvalue.assign(1, 0.0);
-  di.I.reserve(maxs + 1);
-  di.Iijk.reserve(maxs + 1);
-  di.direction.reserve(maxs + 1);
-  di.high_I.reserve(maxs + 1);
-  di.hightvalue.reserve(maxs + 1);
+  di.I.reserve(ntriple + 1);
+  di.Iijk.reserve(ntriple + 1);
+  di.direction.reserve(ntriple + 1);
+  di.high_I.reserve(ntriple + 1);
+  di.hightvalue.reserve(ntriple + 1);
 
   // Ii[a] = point ids on atom a (per-atom growable; In[a] == Ii[a].size()).
   di.Ii.assign(static_cast<std::size_t>(M) + 1, {});
@@ -339,15 +344,8 @@ std::pair<DataI, DataCir> data_I_Cir(const Geom& geom, const Neighbors& nb, doub
   int s = 0;
 
   // circle rows accumulate as {_, i, j, A(3), nij(3), rij}; circle[0] dummy.
-  // reserve() is only a capacity hint -- it never changes contents/order. A
-  // free circle exists for at most one (i,j) directed neighbor pair with j>i,
-  // so half the total CSR neighbour count is a safe (loose) upper bound.
   std::vector<std::array<double, 10>> circle_rows;
-  {
-    long long nb_total = 0;
-    for (int i = 1; i <= M; ++i) nb_total += Row(i);
-    circle_rows.reserve(static_cast<std::size_t>(nb_total / 2) + 1);
-  }
+  circle_rows.reserve(ncircle_ev);
 
   for (int i = 1; i <= M; ++i) {
     const AtomEvents& evi = ev[static_cast<std::size_t>(i)];

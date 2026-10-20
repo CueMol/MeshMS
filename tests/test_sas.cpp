@@ -132,6 +132,10 @@ void check_mol(const std::string& mol) {
 
   // --- nI EXACT; per-point Iijk/direction/high_I EXACT, coords + hightvalue near.
   CHECK(di.nI == ref.nI);
+  // Reserved to the exact count, not the loose combinatorial bound: that bound
+  // asked a 237k-atom ribosome for a single 3.6 GB block, which aborts a host
+  // whose allocator caps single blocks at 2 GB (Electron's PartitionAlloc).
+  CHECK(di.I.capacity() == di.I.size());
   if (di.nI == ref.nI) {
     for (int s = 1; s <= ref.nI; ++s) {
       const PRow& p = ref.P[static_cast<std::size_t>(s)];
