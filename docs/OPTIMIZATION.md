@@ -249,6 +249,44 @@ Not changed here: `build_mesh_from_cache` appends components with an exact-fit
 `reserve` per component, which is quadratic when a structure splits into many
 components.
 
+## Round 5 (2026-10): `fuse_by_id` sort-and-sweep (bit-exact)
+
+After round 4, a stage breakdown of the facade (`BENCH_MODE=facade`) put `fuse_by_id`
+at 38% of the time on 1crn and 69% on 4V6X, scaling only 2.3-3.2x on 8 cores. It built
+a `(tag, cell) -> [vertex]` `unordered_map` serially (5.1M keys on 4V6X), then probed
+27 neighbour cells per tag of each of ~10M tagged vertices -- cache-missing hash lookups
+that capped the parallel phase. With cell = eps = 1e-6 almost every key holds one
+vertex, so the probes found little.
+
+Now every `(tag, cell, vertex)` entry goes into a flat array, sorted with
+`meshms::parallel_sort` (a total order, so the result is deterministic), and each entry
+is compared only with the following entries of the same tag up to one x cell above;
+the y/z cell and `dot(dv, dv) < eps^2` tests are the old predicate. The sweep runs in
+fixed blocks in parallel. Roots map to new indices through a flat array instead of a
+hash map. The union-find partition is order-independent (round 2's argument), so the
+output is unchanged: the same 9,486,972 fused pairs on 4V6X, and `meshms_cli` output on
+1YJO .. 4V6X byte-identical on both builds. `test_fusion` compares the rewrite with a
+copy of the hash-grid port on random tagged clouds (cell-straddling copies, double and
+repeated tags, untagged vertices, short tag lists), under every FP policy.
+
+Facade total, before -> after (Apple M-series, 8 cores, `MESHMS_FP=fast`, best-of-30
+small / 10 medium / 3 for 4V6X, d=0.805 unless noted):
+
+| molecule | atoms | TBB | serial |
+|---|--:|--:|--:|
+| 1YJO | 67 | 1.66 -> 1.26 ms | 3.27 -> 1.88 ms |
+| 1crn | 327 | 5.17 -> 3.63 ms | 15.4 -> 10.5 ms |
+| 1crn d=0.22 | 327 | 19.6 -> 13.9 ms | 53.0 -> 38.2 ms |
+| 101M | 1413 | 18.1 -> 12.5 ms | 61.9 -> 45.9 ms |
+| 4HHB | 4779 | 70.7 -> 44.9 ms | 227 -> 156 ms |
+| 1AON | 58870 | 1604 -> 610 ms | 5327 -> 2081 ms |
+| 4V6X | 237685 | 7580 -> 2753 ms | 24121 -> 8935 ms |
+
+On 4V6X `fuse_by_id` itself went from 5.2 s to 0.4 s (TBB). The remaining profile is
+flat: `data_I_Cir` ~25% (already ~5x on 8 cores), the three meshers ~20%, and serial
+copies / vertex normals (`compute_vertex_normals`, `append_surface`, the `remove_flaps`
+conversions and its recomputed normals) 11-23%.
+
 ## Remaining serial tail (future, smaller payoff)
 
 At 28T@101M the serial-ish remainder is `data_Seg_Pat` (~1.6 ms), `data_ext` (flood-fill,
