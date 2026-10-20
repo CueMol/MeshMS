@@ -20,6 +20,7 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "meshms/geom.hpp"
 #include "meshms/intersection.hpp"
@@ -175,6 +176,14 @@ std::vector<std::vector<std::uint32_t>> sas_components(
   return comps;
 }
 
+// Make room for n more elements with geometric growth. A reserve to the exact
+// new size would reallocate on every component, copying everything appended so
+// far each time (quadratic in the component count).
+template <typename T>
+void reserve_more(std::vector<T>& v, std::size_t n) {
+  if (v.size() + n > v.capacity()) v.reserve(std::max(v.capacity() * 2, v.size() + n));
+}
+
 // Append one component's Surface to the merged MeshResult: vertex indices are
 // offset by the current vertex count and atom_id is remapped through `orig`
 // back to the caller's array. With base == 0 and an identity `orig` (the
@@ -182,21 +191,22 @@ std::vector<std::vector<std::uint32_t>> sas_components(
 void append_surface(MeshResult& out, const Surface& s,
                     const std::vector<std::uint32_t>& orig) {
   const std::uint32_t base = static_cast<std::uint32_t>(out.verts.size());
-  out.verts.reserve(out.verts.size() + s.V.size());
+  reserve_more(out.verts, s.V.size());
   for (const Vec3& v : s.V) out.verts.push_back({v.x, v.y, v.z});
-  out.vnormals.reserve(out.vnormals.size() + s.NV.size());
+  reserve_more(out.vnormals, s.NV.size());
   for (const Vec3& n : s.NV) out.vnormals.push_back({n.x, n.y, n.z});
-  out.faces.reserve(out.faces.size() + s.F.size());
+  reserve_more(out.faces, s.F.size());
   for (const Tri& f : s.F) {
     out.faces.push_back({base + static_cast<std::uint32_t>(f[0]),
                          base + static_cast<std::uint32_t>(f[1]),
                          base + static_cast<std::uint32_t>(f[2])});
   }
-  out.atom_id.reserve(out.atom_id.size() + s.atom_id.size());
+  reserve_more(out.atom_id, s.atom_id.size());
   for (std::int32_t a : s.atom_id) {
     out.atom_id.push_back(
         a == 0 ? 0u : orig[static_cast<std::size_t>(a - 1)] + 1u);
   }
+  reserve_more(out.face_type, s.ftype.size());
   out.face_type.insert(out.face_type.end(), s.ftype.begin(), s.ftype.end());
 }
 
